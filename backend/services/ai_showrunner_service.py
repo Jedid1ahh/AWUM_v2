@@ -254,27 +254,59 @@ class AIShowrunnerService:
             pass
 
     def _materialize_war_games_factions(self, war_games: dict) -> list[dict]:
+        """Create persistent factions from an approved WarGames plan.
+
+        Older approval rows can still contain the former mixed-gender, four-person
+        Team A/Team B payload. Before writing factions, re-read the saved plan and
+        self-heal it against the current roster when enough depth exists so the
+        Factions page always matches the Showrunner intent: men's Team A/B and
+        women's Team A/B, five wrestlers per side.
+        """
         created = []
+        plan_id = war_games.get("id")
+        if plan_id:
+            saved = self.repo.fetch_one("SELECT * FROM war_games_plans WHERE id = ? AND deleted_at IS NULL", (plan_id,))
+            if saved:
+                war_games = self._decode_war_games(saved)
+
+        roster = None
+        if not self._war_games_plan_is_full_gender_split(war_games):
+            roster = self.get_roster_snapshot("Cross-Brand")
+            if self._full_war_games_depth_available(roster):
+                if plan_id:
+                    self._delete_invalid_war_games_plan(plan_id)
+                war_games = self._build_war_games_plan_row(
+                    war_games.get("target_event_name") or "War Games",
+                    war_games.get("target_year") or war_games.get("year") or 1,
+                    war_games.get("target_week") or war_games.get("week") or 1,
+                    war_games.get("year") or 1,
+                    war_games.get("week") or 1,
+                    roster,
+                    random.Random(),
+                )
+
         event_name = war_games.get("target_event_name") or "War Games"
         target_year = war_games.get("target_year") or war_games.get("year") or 1
         target_week = war_games.get("target_week") or war_games.get("week") or 1
         divisions = war_games.get("divisions_json") or war_games.get("divisions") or {}
-        if divisions:
-            sides = []
-            for division_key, division_label in (("mens", "Men's"), ("womens", "Women's")):
-                division_plan = divisions.get(division_key) or {}
-                sides.extend([
-                    (f"{division_label} Team A", division_plan.get("team_a") or []),
-                    (f"{division_label} Team B", division_plan.get("team_b") or []),
-                ])
-        else:
-            sides = [
-                ("Team A", war_games.get("faction_a_json") or war_games.get("faction_a") or []),
-                ("Team B", war_games.get("faction_b_json") or war_games.get("faction_b") or []),
-            ]
+        sides = []
+        for division_key, division_label, gender in (("mens", "Men's", "male"), ("womens", "Women's", "female")):
+            division_plan = divisions.get(division_key) or {}
+            for side_key, side_label in (("team_a", "Team A"), ("team_b", "Team B")):
+                members = division_plan.get(side_key) or []
+                if len(members) == 5 and all(str(m.get("gender", "")).lower() == gender for m in members):
+                    sides.append((f"{division_label} {side_label}", members))
+
+        # If roster depth is thin, allow a single-division fallback, but never a
+        # mixed-gender side. Full saves with enough depth are handled above.
+        if not sides and not self._full_war_games_depth_available(roster or self.get_roster_snapshot("Cross-Brand")):
+            for label, members in (("Team A", war_games.get("faction_a_json") or war_games.get("faction_a") or []),
+                                   ("Team B", war_games.get("faction_b_json") or war_games.get("faction_b") or [])):
+                genders = {str(m.get("gender", "")).lower() for m in members}
+                if len(members) >= 3 and len(genders - {""}) <= 1:
+                    sides.append((label, members))
+
         for label, members in sides:
-            if len(members) < 3:
-                continue
             leader = members[0]
             faction_name = f"{event_name} {label}"
             faction = self._create_persistent_faction(
@@ -2366,7 +2398,7 @@ class AIShowrunnerService:
         self.conn.commit()
         return result
 
-
+    def _refresh_crown_payoff_system(self, year: int, week: int, roster: list[dict], universe, rng: random.Random) -> list[dict]:
         target_name, target_year, target_week = self._target_event(universe, year, week, ["Summer", "Champions", "Clash"], fallback_name="Crown Tournament Payoff")
         created = []
         for tournament_type, division, gender in (("king", "mens", "Male"), ("queen", "womens", "Female")):
