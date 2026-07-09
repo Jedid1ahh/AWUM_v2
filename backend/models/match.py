@@ -25,6 +25,19 @@ class MatchImportance(Enum):
     PROTECT_BOTH = "protect_both"  # Minimize losses for both (DQ/countout likely)
     HIGH_DRAMA = "high_drama"  # Major match, bigger stat swings
 
+    @classmethod
+    def _missing_(cls, value):
+        """Accept legacy/showrunner importance labels used by saved drafts."""
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            aliases = {
+                "main_event": cls.HIGH_DRAMA,
+                "major": cls.HIGH_DRAMA,
+                "tournament": cls.HIGH_DRAMA,
+            }
+            return aliases.get(normalized)
+        return None
+
 
 class FinishType(Enum):
     """How the match ended"""
