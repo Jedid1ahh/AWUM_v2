@@ -137,6 +137,38 @@ class AIShowrunnerTests(unittest.TestCase):
         for faction in created:
             self.assertEqual(5, len(faction["member_ids"]))
 
+
+    def test_approving_legacy_mixed_war_games_payload_self_heals_factions(self):
+        self._add_war_games_depth()
+        self.service.run_weekly(1, 9, seed=77, force=True, autonomy_level="balanced")
+        plan = self.service.list_war_games_plans(limit=1)[0]
+
+        legacy_payload = dict(plan)
+        legacy_payload["divisions_json"] = {}
+        legacy_payload["faction_a_json"] = [
+            {"id": "w_alpha", "name": "Alpha Ace", "gender": "Male"},
+            {"id": "w_beta", "name": "Beta Brawler", "gender": "Male"},
+            {"id": "w_echo", "name": "Echo Knight", "gender": "Male"},
+            {"id": "w_gamma", "name": "Gamma Prospect", "gender": "Female"},
+        ]
+        legacy_payload["faction_b_json"] = [
+            {"id": "wg_m_0", "name": "War Man 0", "gender": "Male"},
+            {"id": "wg_m_1", "name": "War Man 1", "gender": "Male"},
+            {"id": "wg_w_0", "name": "War Woman 0", "gender": "Female"},
+            {"id": "wg_w_1", "name": "War Woman 1", "gender": "Female"},
+        ]
+
+        before = self.database.get_all_factions(active_only=True)
+        self.service._materialize_war_games_factions(legacy_payload)
+        after = self.database.get_all_factions(active_only=True)
+
+        created = [f for f in after if f not in before and "Team" in f["faction_name"]]
+        self.assertEqual(4, len(created))
+        for faction in created:
+            self.assertEqual(5, len(faction["member_ids"]))
+            genders = {self.database.get_wrestler_by_id(member_id)["gender"].lower() for member_id in faction["member_ids"]}
+            self.assertEqual(1, len(genders))
+
     def test_approval_decision_and_aggressive_auto_execute(self):
         result = self.service.run_weekly(1, 10, seed=88, force=True, autonomy_level="aggressive")
 
