@@ -1,0 +1,848 @@
+<div class="container-fluid py-3 booker-command">
+  <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+    <div>
+      <h2 class="mb-1"><i class="bi bi-magic"></i> AI Showrunner</h2>
+      <p class="text-muted mb-0">Auto-book weekly TV, shape PLE roads, and manage the approval queue.</p>
+    </div>
+    <div class="d-flex gap-2 align-items-end">
+      <div>
+        <label class="form-label mb-1">Autonomy</label>
+        <select id="showrunnerAutonomy" class="form-select form-select-sm">
+          <option value="balanced">Balanced</option>
+          <option value="cautious">Cautious</option>
+          <option value="aggressive">Aggressive</option>
+        </select>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="window.runShowrunnerWeek(false)">
+        <i class="bi bi-play-fill"></i> Run AI Week
+      </button>
+      <button class="btn btn-outline-danger btn-sm" onclick="window.runShowrunnerWeek(true)">
+        <i class="bi bi-arrow-repeat"></i> Force Rebook
+      </button>
+      <button class="btn btn-outline-success btn-sm" onclick="window.openLatestAIDraftInBooking()">
+        <i class="bi bi-clipboard-check"></i> Open in Booking
+      </button>
+      <button class="btn btn-outline-info btn-sm" onclick="window.runDarkHouseAutopilot()">
+        <i class="bi bi-moon-stars"></i> Dark/House Auto
+      </button>
+      <button class="btn btn-outline-warning btn-sm" onclick="window.generateShowrunnerPromoBeats()">
+        <i class="bi bi-chat-quote"></i> Promo Beats
+      </button>
+    </div>
+  </div>
+
+  <div id="bookerRunStatus" class="alert py-2 mb-3" style="display:none;"></div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-md-4">
+      <div class="card h-100">
+        <div class="card-header">Command Pulse</div>
+        <div class="card-body">
+          <div class="d-flex justify-content-between mb-2"><span>Pending approvals</span><strong id="bookerPendingCount">0</strong></div>
+          <div class="d-flex justify-content-between mb-2"><span>Active PLE roads</span><strong id="bookerRoadmapCount">0</strong></div>
+          <div class="d-flex justify-content-between"><span>Last run</span><strong id="bookerLastRun">Not run</strong></div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-8">
+      <div class="card h-100">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>Last AI Card Draft</span>
+          <button class="btn btn-sm btn-outline-secondary" onclick="window.loadShowrunnerDashboard()"><i class="bi bi-arrow-clockwise"></i></button>
+        </div>
+        <div class="card-body" id="bookerLastCard">
+          <p class="text-muted mb-0">Run the AI week to generate a persistent show draft.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3">
+    <div class="col-xl-7">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>Booker Inbox</span>
+          <button class="btn btn-sm btn-outline-primary" onclick="window.autoResolveBookerQueue()">Auto-resolve due items</button>
+        </div>
+        <div class="card-body" id="bookerInbox"></div>
+      </div>
+    </div>
+    <div class="col-xl-5">
+      <div class="card mb-3">
+        <div class="card-header">PLE Roadmap Manager</div>
+        <div class="card-body" id="bookerRoadmaps"></div>
+      </div>
+      <div class="card mb-3">
+        <div class="card-header">Special Systems</div>
+        <div class="card-body" id="bookerSpecialSystems"></div>
+      </div>
+      <div class="card">
+        <div class="card-header">Recent Decisions</div>
+        <div class="card-body" id="bookerRecent"></div>
+      </div>
+    </div>
+  </div>
+  <div class="row g-3 mt-1">
+    <div class="col-xl-4">
+      <div class="card h-100">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>Money in the Bank</span>
+          <button class="btn btn-sm btn-outline-secondary" onclick="window.loadMitbPanel()"><i class="bi bi-arrow-clockwise"></i></button>
+        </div>
+        <div class="card-body" id="mitbPanel"></div>
+      </div>
+    </div>
+    <div class="col-xl-4">
+      <div class="card h-100">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>WarGames</span>
+          <button class="btn btn-sm btn-outline-secondary" onclick="window.loadWarGamesPanel()"><i class="bi bi-arrow-clockwise"></i></button>
+        </div>
+        <div class="card-body" id="warGamesPanel"></div>
+      </div>
+    </div>
+    <div class="col-xl-4">
+      <div class="card h-100">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>King / Queen of the Ring</span>
+          <button class="btn btn-sm btn-outline-secondary" onclick="window.loadCrownPanel()"><i class="bi bi-arrow-clockwise"></i></button>
+        </div>
+        <div class="card-body" id="crownPanel"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<style>
+.booker-command .card { border-radius: 8px; }
+.booker-command .decision-card { border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: .8rem; margin-bottom: .75rem; background: rgba(255,255,255,.025); }
+.booker-command .decision-title { font-weight: 800; }
+.booker-command .decision-meta { font-size: .78rem; color: var(--txt-dim, #888); }
+.booker-command .segment-row { display: grid; grid-template-columns: 32px 1fr auto; gap: .6rem; align-items: start; padding: .45rem 0; border-bottom: 1px solid rgba(255,255,255,.08); }
+.booker-command .segment-row:last-child { border-bottom: 0; }
+.booker-command .roadmap-card { border-left: 3px solid #d4af37; padding-left: .75rem; margin-bottom: .85rem; }
+.booker-command .system-chip { border: 1px solid rgba(255,255,255,.12); border-radius: 6px; padding: .55rem; margin-bottom: .55rem; background: rgba(255,255,255,.025); }
+.booker-command .mini-match-row { display: flex; justify-content: space-between; align-items: center; padding: .35rem 0; border-bottom: 1px solid rgba(255,255,255,.06); font-size: .85rem; gap: .5rem; }
+.booker-command .mini-match-row:last-child { border-bottom: 0; }
+.booker-command .bracket-round-label { font-weight: 700; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--txt-dim, #999); margin: .5rem 0 .25rem; }
+.booker-command .special-panel-hint { font-size: .78rem; color: var(--txt-dim, #888); }
+</style>
+
+<script>
+(() => {
+  function unwrap(response) {
+    return response && response.success && response.data !== undefined ? response.data : response;
+  }
+
+  function esc(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  }
+
+  function badge(priority) {
+    var cls = priority === 'critical' ? 'danger' : priority === 'high' ? 'warning text-dark' : 'secondary';
+    return `<span class="badge bg-${cls}">${esc(priority)}</span>`;
+  }
+
+  function attrJson(value) {
+    return JSON.stringify(value).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function setRunStatus(message, type) {
+    var el = document.getElementById('bookerRunStatus');
+    if (!el) return;
+    el.className = 'alert alert-' + (type || 'secondary') + ' py-2 mb-3';
+    el.innerHTML = message;
+    el.style.display = 'block';
+  }
+
+  function setRunButtonsDisabled(disabled) {
+    document.querySelectorAll('button[onclick^="window.runShowrunnerWeek"]').forEach(button => {
+      button.disabled = !!disabled;
+    });
+  }
+
+  function renderCard(card) {
+    if (!card || !card.segments) {
+      return '<p class="text-muted mb-0">No AI card draft yet.</p>';
+    }
+    return `
+      <div class="mb-2"><strong>${esc(card.show_name)}</strong> <span class="text-muted">${esc(card.creative_goal)}</span></div>
+      ${card.segments.map(s => `
+        <div class="segment-row">
+          <strong>${s.position}</strong>
+          <div>
+            <div><strong>${esc(s.segment_type)}</strong> - ${esc(s.description)}</div>
+            <div class="decision-meta">${(s.participants || []).map(p => esc(p.name)).join(' vs ')}${s.winner ? ` | Winner: ${esc(s.winner.name)}` : ''}</div>
+          </div>
+          <span class="badge bg-dark">${s.duration}m</span>
+        </div>`).join('')}
+    `;
+  }
+
+  function renderInbox(items) {
+    var el = document.getElementById('bookerInbox');
+    if (!items || !items.length) {
+      el.innerHTML = '<p class="text-muted mb-0">No pending approvals. The AI has room to breathe.</p>';
+      return;
+    }
+    el.innerHTML = items.map(item => `
+      <div class="decision-card">
+        <div class="d-flex justify-content-between gap-2">
+          <div class="decision-title">${esc(item.title)}</div>
+          ${badge(item.priority)}
+        </div>
+        <div class="decision-meta mb-2">${esc(item.category)} | ${esc(item.autonomy_policy)} | due Y${item.deadline_year || '-'} W${item.deadline_week || '-'}</div>
+        <p class="mb-2">${esc(item.summary)}</p>
+        <div class="btn-group btn-group-sm">
+          <button class="btn btn-success" onclick="window.decideBookerApproval('${item.id}','approve')">Approve</button>
+          <button class="btn btn-warning" onclick="window.decideBookerApproval('${item.id}','counter')">Counter</button>
+          <button class="btn btn-danger" onclick="window.decideBookerApproval('${item.id}','reject')">Reject</button>
+          <button class="btn btn-outline-secondary" onclick="window.decideBookerApproval('${item.id}','dismiss')">Dismiss</button>
+        </div>
+      </div>`).join('');
+  }
+
+  function renderRoadmaps(roadmaps) {
+    var el = document.getElementById('bookerRoadmaps');
+    if (!roadmaps || !roadmaps.length) {
+      el.innerHTML = '<p class="text-muted mb-0">No PLE roadmaps yet. Run the AI week.</p>';
+      return;
+    }
+    el.innerHTML = roadmaps.map(r => {
+      var main = r.main_event_json || {};
+      var bets = r.risk_bets_json || [];
+      return `
+        <div class="roadmap-card">
+          <div class="d-flex justify-content-between">
+            <strong>${esc(r.event_name)}</strong>
+            <span class="badge bg-dark">Y${r.target_year} W${r.target_week}</span>
+          </div>
+          <p class="mb-1">${esc(r.headline_plan)}</p>
+          <div class="decision-meta">Main: ${esc(main.challenger)} vs ${esc(main.recommended_winner)} | Finish: ${esc(main.finish)}</div>
+          <div class="decision-meta">Risk bets: ${bets.map(b => esc(b.name)).join(', ') || 'None'}</div>
+        </div>`;
+    }).join('');
+  }
+
+  function renderSpecialSystems(special) {
+    var el = document.getElementById('bookerSpecialSystems');
+    if (!el) return;
+    special = special || {};
+    var angles = special.recent_angles || [];
+    var darkHouse = special.dark_house_runs || [];
+    var interruptions = special.live_interruptions || [];
+    var promoBeats = special.promo_beats || [];
+    el.innerHTML = `
+      <div class="system-chip">
+        <strong>Angle Library</strong>
+        <div class="decision-meta">${special.angle_templates_count || 0} templates | Latest: ${angles[0] ? esc(angles[0].template_name) : 'None'}</div>
+      </div>
+      <div class="system-chip">
+        <strong>Dark / House Autopilot</strong>
+        <div class="decision-meta">${darkHouse.length ? darkHouse.slice(0, 2).map(s => `${esc(s.show_name)}: ${esc(s.attendance)} fans`).join(' | ') : 'No auxiliary shows logged yet'}</div>
+      </div>
+      <div class="system-chip">
+        <strong>Live Interruptions</strong>
+        <div class="decision-meta">${interruptions.length ? interruptions.slice(0, 2).map(i => `${esc(i.interruption_type)} on ${esc(i.show_name)}`).join(' | ') : 'No live shocks yet'}</div>
+      </div>
+      <div class="system-chip">
+        <strong>Promo / Dialogue Beats</strong>
+        <div class="decision-meta">${promoBeats.length ? promoBeats.slice(0, 2).map(b => `${esc(b.beat_type)}: ${esc(b.hook_text).slice(0, 70)}`).join(' | ') : 'No dialogue beats generated yet'}</div>
+      </div>
+    `;
+  }
+
+  function renderRecent(items) {
+    var el = document.getElementById('bookerRecent');
+    if (!items || !items.length) {
+      el.innerHTML = '<p class="text-muted mb-0">No decisions recorded yet.</p>';
+      return;
+    }
+    el.innerHTML = items.slice(0, 8).map(item => `
+      <div class="mb-2">
+        <strong>${esc(item.title)}</strong>
+        <div class="decision-meta">${esc(item.status)} | ${esc(item.created_at)}</div>
+      </div>`).join('');
+  }
+
+  window.loadShowrunnerDashboard = async function() {
+    try {
+      var dashboard = unwrap(await fetchAPI('/api/booker/showrunner/dashboard'));
+      document.getElementById('bookerPendingCount').textContent = dashboard.summary.pending_approvals;
+      document.getElementById('bookerRoadmapCount').textContent = dashboard.summary.active_roadmaps;
+      document.getElementById('bookerLastRun').textContent = dashboard.summary.last_run_status;
+      document.getElementById('bookerLastCard').innerHTML = renderCard(dashboard.last_run && dashboard.last_run.generated_card_json);
+      renderInbox(dashboard.pending_approvals);
+      renderRoadmaps(dashboard.roadmaps);
+      renderSpecialSystems(dashboard.special_systems);
+      renderRecent(dashboard.recent_decisions);
+    } catch (err) {
+      document.getElementById('bookerInbox').innerHTML = `<div class="alert alert-danger">${esc(err.message)}</div>`;
+    }
+  };
+
+  window.runShowrunnerWeek = async function(force) {
+    var autonomy = document.getElementById('showrunnerAutonomy').value;
+    setRunButtonsDisabled(true);
+    setRunStatus('<span class="spinner-border spinner-border-sm me-2"></span>AI Showrunner is drafting this week...', 'info');
+    try {
+      var result = unwrap(await fetchAPI('/api/booker/showrunner/weekly', {
+        method: 'POST',
+        body: JSON.stringify({ autonomy_level: autonomy, force: !!force })
+      }));
+      if (result.already_ran) {
+        setRunStatus('AI already has a draft for this show week. Use <strong>Force Rebook</strong> to replace it.', 'warning');
+        if (window.showToast) showToast('AI week already ran', 'warning');
+      } else {
+        var drafted = ((result.card || {}).segments || []).length;
+        var approvals = (result.approvals_created || []).length;
+        var executed = (result.auto_executed || []).length;
+        setRunStatus(`AI drafted <strong>${drafted}</strong> card item(s), created <strong>${approvals}</strong> approval(s), and auto-executed <strong>${executed}</strong> decision(s).`, 'success');
+        if (window.showToast) showToast('AI showrunner drafted the week', 'success');
+      }
+      await window.loadShowrunnerDashboard();
+    } catch (err) {
+      setRunStatus(`<strong>AI week failed:</strong> ${esc(err.message || err)}`, 'danger');
+      if (window.showToast) showToast('AI week failed: ' + (err.message || err), 'danger');
+    } finally {
+      setRunButtonsDisabled(false);
+    }
+  };
+
+  window.openLatestAIDraftInBooking = function() {
+    try {
+      sessionStorage.setItem('awumUseShowrunnerDraft', '1');
+    } catch (err) {}
+    if (typeof loadView === 'function') {
+      loadView('booking');
+    } else {
+      window.location.hash = '#booking';
+    }
+  };
+
+  window.decideBookerApproval = async function(id, decision) {
+    var counter = '';
+    if (decision === 'counter') {
+      counter = prompt('Counter-pitch to the AI showrunner:', 'Change the winner, but keep the story beat alive.') || '';
+    }
+    await fetchAPI(`/api/booker/approval-queue/${id}/decision`, {
+      method: 'POST',
+      body: JSON.stringify({ decision, counter_pitch: counter, notes: `Handled from Booker page: ${decision}` })
+    });
+    await window.loadShowrunnerDashboard();
+  };
+
+  window.autoResolveBookerQueue = async function() {
+    var result = unwrap(await fetchAPI('/api/booker/approval-queue/auto-resolve', { method: 'POST', body: JSON.stringify({}) }));
+    if (window.showToast) showToast(`Auto-resolved ${result.resolved || 0} due item(s)`, 'success');
+    await window.loadShowrunnerDashboard();
+  };
+
+  window.runDarkHouseAutopilot = async function() {
+    try {
+      var autonomy = document.getElementById('showrunnerAutonomy').value;
+      setRunStatus('<span class="spinner-border spinner-border-sm me-2"></span>Running dark/house autopilot...', 'info');
+      var result = unwrap(await fetchAPI('/api/booker/showrunner/dark-house-week', {
+        method: 'POST',
+        body: JSON.stringify({ autonomy_level: autonomy, force: true })
+      }));
+      setRunStatus(`Dark/house autopilot logged <strong>${(result.created || []).length}</strong> auxiliary show(s).`, 'success');
+      if (window.showToast) showToast('Dark/house autopilot completed', 'success');
+      await window.loadShowrunnerDashboard();
+    } catch (err) {
+      setRunStatus(`<strong>Dark/house autopilot failed:</strong> ${esc(err.message || err)}`, 'danger');
+    }
+  };
+
+  window.generateShowrunnerPromoBeats = async function() {
+    try {
+      setRunStatus('<span class="spinner-border spinner-border-sm me-2"></span>Generating promo beats...', 'info');
+      var latest = unwrap(await fetchAPI('/api/booker/showrunner/latest-booking-draft'));
+      var result = unwrap(await fetchAPI('/api/booker/showrunner/promo-beats', {
+        method: 'POST',
+        body: JSON.stringify({ show_draft: latest.show_draft || null, force: true })
+      }));
+      setRunStatus(`Generated <strong>${result.total || 0}</strong> promo/dialogue beat(s).`, 'success');
+      if (window.showToast) showToast('Promo beats generated', 'success');
+      await window.loadShowrunnerDashboard();
+    } catch (err) {
+      setRunStatus(`<strong>Promo beat generation failed:</strong> ${esc(err.message || err)}`, 'danger');
+    }
+  };
+
+  // ==========================================================================
+  // MONEY IN THE BANK PANEL
+  // ==========================================================================
+
+  var mitbState = { card: null };
+
+  function navigateToBookingWithMatches(matches, toastMessage) {
+    try {
+      sessionStorage.setItem('awumPendingSpecialMatches', JSON.stringify(matches));
+    } catch (err) {}
+    if (window.showToast) showToast(toastMessage || 'Sending match to Booking Office...', 'info');
+    if (typeof loadView === 'function') {
+      loadView('booking');
+    } else {
+      window.location.hash = '#booking';
+    }
+  }
+
+  function buildSideMatchPayload(matchType, sideAWrestlers, sideBWrestlers, description, isTitleMatch) {
+    return {
+      match_id: 'booker_' + matchType + '_' + Date.now(),
+      match_type: matchType,
+      side_a: {
+        wrestler_ids: sideAWrestlers.map(w => w.id),
+        wrestler_names: sideAWrestlers.map(w => w.name),
+        is_tag_team: sideAWrestlers.length > 1
+      },
+      side_b: {
+        wrestler_ids: sideBWrestlers.map(w => w.id),
+        wrestler_names: sideBWrestlers.map(w => w.name),
+        is_tag_team: sideBWrestlers.length > 1
+      },
+      booked_winner: null,
+      booking_bias: 'even',
+      importance: 'high_drama',
+      is_title_match: !!isTitleMatch,
+      ai_description: description,
+      special_stipulation: matchType
+    };
+  }
+
+  function renderMitbPanel() {
+    var el = document.getElementById('mitbPanel');
+    if (!el) return;
+    var card = mitbState.card;
+    var briefcases = mitbState.briefcases || [];
+
+    var fieldsHtml = '';
+    var anyConfirmable = false;
+    if (mitbState.cardError) {
+      fieldsHtml = `<div class="alert alert-warning py-2 mb-2" style="font-size:.8rem;">${esc(mitbState.cardError)}</div>`;
+    } else if (card && card.matches) {
+      ['mens', 'womens'].forEach(division => {
+        var m = card.matches[division] || {};
+        var field = m.field || [];
+        var status = m.status || 'draft';
+        var label = division === 'mens' ? "Men's Ladder Match" : "Women's Ladder Match";
+        if (status !== 'confirmed') anyConfirmable = true;
+        fieldsHtml += `
+          <div class="mb-2">
+            <div class="d-flex justify-content-between align-items-center">
+              <strong>${label}</strong>
+              <span class="badge ${status === 'confirmed' ? 'bg-success' : 'bg-secondary'}" style="font-size:.65rem;">${esc(status)}</span>
+            </div>
+            <div class="decision-meta">
+              ${field.map(w => `
+                <span class="d-inline-flex align-items-center me-2 mb-1">
+                  ${esc(w.name)}
+                  <button class="btn btn-xs btn-outline-secondary ms-1" style="font-size:.6rem;padding:.05rem .3rem;"
+                    onclick="window.replaceMitbParticipant(${attrJson(division)}, ${attrJson(w.id)}, ${attrJson(w.name)})" title="Replace">
+                    <i class="bi bi-arrow-repeat"></i>
+                  </button>
+                </span>`).join('') || 'Not enough eligible roster members'}
+            </div>
+          </div>`;
+      });
+    } else {
+      fieldsHtml = '<p class="special-panel-hint mb-2">Build the card to select the 6-person ladder fields for both divisions.</p>';
+    }
+
+    var briefcaseHtml = briefcases.length
+      ? briefcases.map(b => `
+        <div class="mini-match-row">
+          <span>${esc(b.holder_name)} <span class="badge bg-dark">${esc(b.division)}</span> <span class="badge bg-secondary">${esc(b.status)}</span></span>
+          ${b.status === 'active' ? `<button class="btn btn-xs btn-outline-warning" style="font-size:.7rem;padding:.1rem .4rem;" onclick="window.cashInMitbBriefcase('${b.id}')">Cash In</button>` : ''}
+        </div>`).join('')
+      : '<p class="special-panel-hint mb-0">No briefcases awarded yet.</p>';
+
+    var canSendBoth = card && card.matches && !mitbState.cardError &&
+      ['mens', 'womens'].some(d => (card.matches[d] && card.matches[d].field || []).length >= 2);
+
+    el.innerHTML = `
+      <button class="btn btn-sm btn-primary w-100 mb-2" onclick="window.buildMitbCard()">
+        <i class="bi bi-hammer"></i> Build MITB Card (this week)
+      </button>
+      ${fieldsHtml}
+      ${card && !mitbState.cardError ? `
+        <div class="d-flex gap-2 mb-2">
+          <button class="btn btn-xs btn-outline-success flex-fill" style="font-size:.72rem;" onclick="window.confirmMitbCard()" ${!anyConfirmable ? 'disabled' : ''}>
+            <i class="bi bi-check2"></i> Confirm Card
+          </button>
+          <button class="btn btn-xs btn-outline-success flex-fill" style="font-size:.72rem;" onclick="window.sendBothMitbFieldsToBooking()" ${!canSendBoth ? 'disabled' : ''}>
+            <i class="bi bi-send"></i> Send Both to Booking
+          </button>
+        </div>` : ''}
+      <div class="bracket-round-label">Active / Resolved Briefcases</div>
+      ${briefcaseHtml}
+    `;
+  }
+
+  window.loadMitbPanel = async function() {
+    try {
+      var briefcases = unwrap(await fetchAPI('/api/booker/showrunner/mitb/briefcases'));
+      mitbState.briefcases = briefcases.briefcases || [];
+      renderMitbPanel();
+    } catch (err) {
+      var el = document.getElementById('mitbPanel');
+      if (el) el.innerHTML = `<div class="alert alert-danger py-2 mb-0">${esc(err.message || err)}</div>`;
+    }
+  };
+
+  window.buildMitbCard = async function() {
+    try {
+      mitbState.cardError = null;
+      mitbState.card = unwrap(await fetchAPI('/api/booker/showrunner/mitb/card'));
+      renderMitbPanel();
+      if (window.showToast) showToast('MITB fields built for both divisions', 'success');
+    } catch (err) {
+      mitbState.card = null;
+      mitbState.cardError = err.message || String(err);
+      renderMitbPanel();
+      if (window.showToast) showToast('MITB card build failed: ' + (err.message || err), 'danger');
+    }
+  };
+
+  window.replaceMitbParticipant = async function(division, oldWrestlerId, oldWrestlerName) {
+    var newName = prompt('Replace ' + oldWrestlerName + ' with which wrestler? (enter name)');
+    if (!newName) return;
+    try {
+      var rosterResp = unwrap(await fetchAPI('/api/roster?brand=Cross-Brand'));
+      var roster = Array.isArray(rosterResp) ? rosterResp : (rosterResp.roster || rosterResp.wrestlers || []);
+      var match = roster.find(w => (w.name || '').toLowerCase() === newName.toLowerCase());
+      if (!match) {
+        if (window.showToast) showToast('No wrestler found matching "' + newName + '"', 'warning');
+        return;
+      }
+      var result = unwrap(await fetchAPI('/api/booker/showrunner/mitb/card/replace', {
+        method: 'POST',
+        body: JSON.stringify({
+          division: division, old_wrestler_id: oldWrestlerId, new_wrestler_id: match.id, new_wrestler_name: match.name,
+        })
+      }));
+      if (result.error) throw new Error(result.error);
+      mitbState.card.matches[division].field = result.field;
+      renderMitbPanel();
+      if (window.showToast) showToast(oldWrestlerName + ' replaced with ' + match.name, 'success');
+    } catch (err) {
+      if (window.showToast) showToast('Replace failed: ' + (err.message || err), 'danger');
+    }
+  };
+
+  window.confirmMitbCard = async function() {
+    try {
+      var result = unwrap(await fetchAPI('/api/booker/showrunner/mitb/card/confirm', { method: 'POST', body: JSON.stringify({}) }));
+      ['mens', 'womens'].forEach(d => {
+        if (result.confirmed_divisions.includes(d) && mitbState.card.matches[d]) mitbState.card.matches[d].status = 'confirmed';
+      });
+      renderMitbPanel();
+      if (window.showToast) showToast('MITB card confirmed and saved', 'success');
+    } catch (err) {
+      if (window.showToast) showToast('Confirm failed: ' + (err.message || err), 'danger');
+    }
+  };
+
+  window.sendBothMitbFieldsToBooking = function() {
+    var card = mitbState.card;
+    if (!card || !card.matches) return;
+    var matches = [];
+    ['mens', 'womens'].forEach(division => {
+      var field = (card.matches[division] || {}).field || [];
+      if (field.length >= 2) {
+        var label = division === 'mens' ? "Men's Money in the Bank Ladder Match" : "Women's Money in the Bank Ladder Match";
+        matches.push(buildSideMatchPayload('money_in_the_bank', field, [], label, false));
+      }
+    });
+    if (!matches.length) return;
+    navigateToBookingWithMatches(matches, 'Sending both MITB ladder matches to Booking Office...');
+  };
+
+  window.cashInMitbBriefcase = async function(briefcaseId) {
+    try {
+      var champResponse = await fetchAPI('/api/championships');
+      var champs = unwrap(champResponse);
+      var list = (Array.isArray(champs) ? champs : champs.championships || []).filter(c => c.title_type !== 'Tag Team');
+      if (!list.length) {
+        if (window.showToast) showToast('No singles championships found to cash in on', 'warning');
+        return;
+      }
+      var options = list.map((c, i) => `${i + 1}. ${c.name} (held by ${c.current_holder_name || 'vacant'})`).join('\n');
+      var choice = prompt('Cash in on which title?\n\n' + options + '\n\nEnter a number:');
+      var idx = parseInt(choice, 10) - 1;
+      if (!(idx >= 0 && idx < list.length)) return;
+      var target = list[idx];
+
+      var mode = prompt(
+        'Cash in NOW, or SCHEDULE it for a future week?\n\nEnter "now" to resolve immediately,\nor a week number (1-52) to schedule the cash-in for that week.'
+      );
+      if (!mode) return;
+      var scheduledWeek = parseInt(mode, 10);
+      if (!isNaN(scheduledWeek) && scheduledWeek >= 1 && scheduledWeek <= 52) {
+        var currentState = unwrap(await fetchAPI('/api/game-state'));
+        var scheduledYear = (currentState && currentState.year) || 1;
+        var result = unwrap(await fetchAPI('/api/booker/showrunner/mitb/cash-in/schedule', {
+          method: 'POST',
+          body: JSON.stringify({ briefcase_id: briefcaseId, target_title_id: target.id, scheduled_year: scheduledYear, scheduled_week: scheduledWeek })
+        }));
+        if (result.error) throw new Error(result.error);
+        if (window.showToast) showToast(`Cash-in on ${target.name} scheduled for Week ${scheduledWeek}. The AI will notify you and book the title match as that show's main event.`, 'success');
+        await window.loadMitbPanel();
+        return;
+      }
+
+      var won = confirm('Does the briefcase holder WIN this cash-in?\n\nOK = Win the title\nCancel = Fail the cash-in (briefcase is spent either way)');
+      var result = unwrap(await fetchAPI('/api/booker/showrunner/mitb/cash-in', {
+        method: 'POST',
+        body: JSON.stringify({ briefcase_id: briefcaseId, target_title_id: target.id, wrestler_won: won })
+      }));
+      if (result.error) throw new Error(result.error);
+      if (window.showToast) {
+        showToast(won ? `NEW CHAMPION crowned via cash-in on ${target.name}!` : `Cash-in on ${target.name} failed - briefcase spent.`, won ? 'success' : 'warning');
+      }
+      await window.loadMitbPanel();
+    } catch (err) {
+      if (window.showToast) showToast('Cash-in failed: ' + (err.message || err), 'danger');
+    }
+  };
+
+  // ==========================================================================
+  // WARGAMES PANEL
+  // ==========================================================================
+
+  var warGamesState = { plan: null };
+
+  function renderWarGamesPanel() {
+    var el = document.getElementById('warGamesPanel');
+    if (!el) return;
+    var plan = warGamesState.plan;
+    if (!plan || !plan.faction_a_json) {
+      el.innerHTML = `
+        <button class="btn btn-sm btn-primary w-100 mb-2" onclick="window.buildWarGamesPlan()">
+          <i class="bi bi-hammer"></i> Build / Fetch Faction Plan
+        </button>
+        <p class="special-panel-hint mb-0">No WarGames plan yet for the target event.</p>`;
+      return;
+    }
+    var divisions = plan.divisions_json || {};
+    var advantage = plan.advantage_holder_json || {};
+    var hasDivisions = divisions.mens || divisions.womens;
+    var teamsHtml = '';
+    if (hasDivisions) {
+      [['mens', "Men's"], ['womens', "Women's"]].forEach(function(pair) {
+        var division = divisions[pair[0]] || {};
+        var teamA = division.team_a || [];
+        var teamB = division.team_b || [];
+        teamsHtml += `
+          <div class="bracket-round-label">${pair[1]} WarGames Match</div>
+          <div class="mb-1"><strong>${pair[1]} Team A</strong> (${teamA.length}): ${teamA.map(w => esc(w.name)).join(', ')}</div>
+          <div class="mb-2"><strong>${pair[1]} Team B</strong> (${teamB.length}): ${teamB.map(w => esc(w.name)).join(', ')}</div>`;
+      });
+    } else {
+      var factionA = plan.faction_a_json || [];
+      var factionB = plan.faction_b_json || [];
+      teamsHtml = `
+        <div class="mb-1"><strong>Team A</strong> (${factionA.length}): ${factionA.map(w => esc(w.name)).join(', ')}</div>
+        <div class="mb-2"><strong>Team B</strong> (${factionB.length}): ${factionB.map(w => esc(w.name)).join(', ')}</div>`;
+    }
+    el.innerHTML = `
+      <button class="btn btn-sm btn-primary w-100 mb-2" onclick="window.buildWarGamesPlan()">
+        <i class="bi bi-arrow-clockwise"></i> Refresh Plan
+      </button>
+      <div class="decision-meta mb-1"><strong>${esc(plan.target_event_name || 'Target Event')}</strong> - Y${plan.target_year} W${plan.target_week}</div>
+      ${teamsHtml}
+      <div class="decision-meta mb-2">Advantage: ${esc(advantage.name || 'TBD')}</div>
+      <div class="btn-group btn-group-sm w-100 mb-2">
+        <button class="btn btn-outline-success" onclick="window.sendWarGamesToBooking()"><i class="bi bi-send"></i> Send to Booking</button>
+        <button class="btn btn-outline-info" onclick="window.simulateWarGamesNow()"><i class="bi bi-play-circle"></i> Simulate Now</button>
+      </div>
+      <div id="warGamesSimResult"></div>
+    `;
+  }
+
+  window.loadWarGamesPanel = async function() {
+    try {
+      var plans = unwrap(await fetchAPI('/api/booker/showrunner/war-games/list'));
+      warGamesState.plan = (plans.plans || [])[0] || null;
+      renderWarGamesPanel();
+    } catch (err) {
+      var el = document.getElementById('warGamesPanel');
+      if (el) el.innerHTML = `<div class="alert alert-danger py-2 mb-0">${esc(err.message || err)}</div>`;
+    }
+  };
+
+  window.buildWarGamesPlan = async function() {
+    try {
+      warGamesState.plan = unwrap(await fetchAPI('/api/booker/showrunner/war-games/plan'));
+      renderWarGamesPanel();
+      if (window.showToast) showToast('WarGames faction plan ready', 'success');
+    } catch (err) {
+      if (window.showToast) showToast('WarGames plan build failed: ' + (err.message || err), 'danger');
+    }
+  };
+
+  window.sendWarGamesToBooking = function() {
+    var plan = warGamesState.plan;
+    if (!plan) return;
+    var divisions = plan.divisions_json || {};
+    var matches = [];
+    if (divisions.mens || divisions.womens) {
+      [['mens', "Men's"], ['womens', "Women's"]].forEach(function(pair) {
+        var division = divisions[pair[0]] || {};
+        var teamA = division.team_a || [];
+        var teamB = division.team_b || [];
+        if (teamA.length && teamB.length) {
+          matches.push(buildSideMatchPayload('war_games', teamA, teamB, pair[1] + ' WarGames - ' + (plan.target_event_name || 'Faction War'), false));
+        }
+      });
+    } else {
+      var factionA = (plan.faction_a_json || []);
+      var factionB = (plan.faction_b_json || []);
+      if (factionA.length && factionB.length) matches.push(buildSideMatchPayload('war_games', factionA, factionB, 'WarGames - ' + (plan.target_event_name || 'Faction War'), false));
+    }
+    if (!matches.length) {
+      if (window.showToast) showToast('WarGames needs complete Team A and Team B sides', 'warning');
+      return;
+    }
+    navigateToBookingWithMatches(matches, 'Sending WarGames matches to Booking Office...');
+  };
+
+  window.simulateWarGamesNow = async function() {
+    var plan = warGamesState.plan;
+    if (!plan) return;
+    var resultEl = document.getElementById('warGamesSimResult');
+    try {
+      if (resultEl) resultEl.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Simulating...';
+      var result = unwrap(await fetchAPI('/api/booker/showrunner/war-games/simulate', {
+        method: 'POST',
+        body: JSON.stringify({ plan_id: plan.id })
+      }));
+      if (result.error) throw new Error(result.error);
+      var beats = Object.keys(result.dramatic_beats_hit || {}).filter(k => result.dramatic_beats_hit[k]);
+      if (resultEl) {
+        resultEl.innerHTML = `
+          <div class="decision-meta"><strong>Winner:</strong> ${result.winning_team.map(w => esc(w.name)).join(', ')} (${result.duration_minutes} min)</div>
+          <div class="decision-meta">Beats hit: ${beats.map(b => esc(b.replace(/_/g, ' '))).join(', ') || 'None'}</div>
+          <details class="mt-1"><summary class="special-panel-hint" style="cursor:pointer;">Show highlights (${result.highlights.length})</summary>
+            ${result.highlights.map(h => `<div class="decision-meta">[${esc(h.timestamp)}] ${esc(h.description)}</div>`).join('')}
+          </details>`;
+      }
+      if (window.showToast) showToast('WarGames simulated: ' + result.winning_team.map(w => w.name).join(' & ') + ' win!', 'success');
+    } catch (err) {
+      if (resultEl) resultEl.innerHTML = `<div class="alert alert-danger py-2 mb-0">${esc(err.message || err)}</div>`;
+    }
+  };
+
+  // ==========================================================================
+  // KING / QUEEN OF THE RING PANEL
+  // ==========================================================================
+
+  var crownState = { tournaments: [] };
+
+  function renderBracketMatch(tournament, round, match) {
+    var a = match.wrestler_a, b = match.wrestler_b;
+    var sched = match.scheduled || {};
+    var schedLabel = `${esc(sched.name || 'TBD')} (Wk ${sched.week}${sched.tier === 'minor' ? ', minor PLE' : ''})`;
+    var ready = a && b && !match.winner;
+    var body = `${a ? esc(a.name) : 'TBD'} vs ${b ? esc(b.name) : 'TBD'}`;
+    if (match.winner) {
+      body = `<s>${a ? esc(a.name) : 'TBD'}</s> vs <s>${b ? esc(b.name) : 'TBD'}</s> - <strong>${esc(match.winner.name)} advances</strong>`;
+    }
+    var actions = '';
+    if (ready) {
+      actions = `
+        <div class="btn-group btn-group-sm mt-1">
+          <button class="btn btn-outline-warning" style="font-size:.7rem;" onclick="window.resolveCrownMatch(${attrJson(tournament.id)}, ${round}, ${match.match_num}, ${attrJson(a.id)}, ${attrJson(a.name)})">${esc(a.name)} wins</button>
+          <button class="btn btn-outline-warning" style="font-size:.7rem;" onclick="window.resolveCrownMatch(${attrJson(tournament.id)}, ${round}, ${match.match_num}, ${attrJson(b.id)}, ${attrJson(b.name)})">${esc(b.name)} wins</button>
+        </div>
+        <div class="decision-meta text-muted" style="font-size:.7rem;">Already queued into this show's AI Booking Draft - no need to send it manually.</div>`;
+    }
+    return `<div class="mini-match-row" style="flex-direction:column;align-items:flex-start;">
+        <div>${body}</div>
+        <div class="decision-meta">${schedLabel}</div>
+        ${actions}
+      </div>`;
+  }
+
+  function renderCrownPanel() {
+    var el = document.getElementById('crownPanel');
+    if (!el) return;
+    var tournaments = crownState.tournaments || [];
+    var buttonsHtml = `
+      <div class="btn-group btn-group-sm w-100 mb-2">
+        <button class="btn btn-primary" onclick="window.buildCrownTournament('king')">Build King Bracket</button>
+        <button class="btn btn-outline-primary" onclick="window.buildCrownTournament('queen')">Build Queen Bracket</button>
+      </div>`;
+    if (!tournaments.length) {
+      el.innerHTML = buttonsHtml + '<p class="special-panel-hint mb-0">No brackets built yet.</p>';
+      return;
+    }
+    el.innerHTML = buttonsHtml + tournaments.map(t => {
+      var bracket = t.bracket || {};
+      var rounds = bracket.rounds || [];
+      var statusBadge = t.status === 'completed'
+        ? '<span class="badge bg-success">Crowned</span>'
+        : `<span class="badge bg-secondary">${esc(t.status)}</span>`;
+      return `
+        <div class="mb-2">
+          <div class="d-flex justify-content-between"><strong>${esc(t.name)}</strong> ${statusBadge}</div>
+          ${rounds.map(r => `
+            <div class="bracket-round-label">${esc(r.round_name)}</div>
+            ${r.matches.map(m => renderBracketMatch(t, r.round, m)).join('')}
+          `).join('')}
+        </div>`;
+    }).join('<hr>');
+  }
+
+  window.loadCrownPanel = async function() {
+    try {
+      var list = unwrap(await fetchAPI('/api/booker/showrunner/crown-tournament/list'));
+      crownState.tournaments = list.tournaments || [];
+      renderCrownPanel();
+    } catch (err) {
+      var el = document.getElementById('crownPanel');
+      if (el) el.innerHTML = `<div class="alert alert-danger py-2 mb-0">${esc(err.message || err)}</div>`;
+    }
+  };
+
+  window.buildCrownTournament = async function(tournamentType) {
+    try {
+      var result = unwrap(await fetchAPI('/api/booker/showrunner/crown-tournament/build', {
+        method: 'POST',
+        body: JSON.stringify({ tournament_type: tournamentType })
+      }));
+      if (result.error) throw new Error(result.error);
+      if (window.showToast) showToast((tournamentType === 'king' ? 'King' : 'Queen') + ' of the Ring bracket built', 'success');
+      await window.loadCrownPanel();
+    } catch (err) {
+      if (window.showToast) showToast('Bracket build failed: ' + (err.message || err), 'danger');
+    }
+  };
+
+  window.resolveCrownMatch = async function(tournamentId, round, matchNum, winnerId, winnerName) {
+    try {
+      var result = unwrap(await fetchAPI('/api/booker/showrunner/crown-tournament/resolve', {
+        method: 'POST',
+        body: JSON.stringify({ tournament_id: tournamentId, round_number: round, match_num: matchNum, winner_id: winnerId, winner_name: winnerName })
+      }));
+      if (result.error) throw new Error(result.error);
+      if (result.tournament_completed) {
+        var payoff = result.title_opportunity || {};
+        if (window.showToast) showToast(`${winnerName} is CROWNED! Title shot booked for ${payoff.payoff_event_name || 'Summer Slamfest'}.`, 'success');
+      } else if (window.showToast) {
+        showToast(winnerName + ' advances', 'success');
+      }
+      await window.loadCrownPanel();
+    } catch (err) {
+      if (window.showToast) showToast('Resolve failed: ' + (err.message || err), 'danger');
+    }
+  };
+
+  window.loadMitbPanel();
+  window.loadWarGamesPanel();
+  window.loadCrownPanel();
+  window.loadShowrunnerDashboard();
+})();
+</script>
