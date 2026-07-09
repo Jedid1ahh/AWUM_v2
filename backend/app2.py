@@ -1259,6 +1259,51 @@ def api_get_championship(title_id):
     return jsonify(championship.to_dict())
 
 
+def _clear_championships_in_memory():
+    """Keep the running universe synchronized with a title-history reset."""
+    for championship in (universe.championships or []):
+        championship.current_holder_id = None
+        championship.current_holder_name = None
+        championship.interim_holder_id = None
+        championship.interim_holder_name = None
+        championship.last_defense_year = None
+        championship.last_defense_week = None
+        championship.last_defense_show_id = None
+        championship.total_defenses = 0
+        championship.vacancy_reason = "Fresh start reset"
+        championship.history = []
+
+
+@app.route('/api/championships/reset-all-history', methods=['POST'])
+def api_reset_all_championship_history():
+    """Vacate every title and clear all championship history/statistics."""
+    try:
+        result = database.reset_all_championship_history()
+        _clear_championships_in_memory()
+
+        autosave_written = False
+        try:
+            from persistence.save_manager import SaveManager
+            SaveManager().save_universe(
+                database,
+                slot=0,
+                save_name='Autosave - Championship Fresh Start',
+                include_history=True
+            )
+            autosave_written = True
+        except Exception as save_error:
+            print(f"   ⚠️ Championship reset completed, but autosave failed: {save_error}")
+
+        return jsonify({
+            'success': True,
+            'message': 'All championships are vacant and title statistics have been cleared.',
+            **result,
+            'autosave_written': autosave_written,
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 # ============================================================================
 # API ROUTES - Statistics
 # ============================================================================
