@@ -145,10 +145,22 @@ def api_reset_all_championship_history():
             championship.total_defenses = 0
             championship.vacancy_reason = "Fresh start reset"
             championship.history = []
+
+        # Persist the reset immediately so a page refresh or app restart cannot
+        # rehydrate stale champions/reigns from autosave.
+        autosave_written = False
+        try:
+            from persistence.save_manager import SaveManager
+            SaveManager().save_universe(database, slot=0, save_name='Autosave - Championship Fresh Start', include_history=True)
+            autosave_written = True
+        except Exception as save_error:
+            print(f"   ⚠️ Championship reset completed, but autosave failed: {save_error}")
+
         return jsonify({
             'success': True,
             'message': 'All championships are vacant and title statistics have been cleared.',
             **result,
+            'autosave_written': autosave_written,
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500

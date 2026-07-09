@@ -3,7 +3,7 @@
     "save_slot": 1,
     "save_name": "Test Save",
     "created_at": "2026-01-15T12:36:15.788219",
-    "last_modified": "2026-01-15T12:36:15.788219",
+    "last_modified": "2026-07-09T14:41:58.645933",
     "current_year": 2,
     "current_week": 1,
     "balance": 12859319,
@@ -1470,10 +1470,12 @@
       "assigned_brand": "ROC Alpha",
       "title_type": "World",
       "prestige": 90,
-      "current_holder_id": "w001",
-      "current_holder_name": "Magnus Steele",
+      "current_holder_id": null,
+      "current_holder_name": null,
       "created_at": "2026-01-14T15:23:30.632088",
-      "updated_at": "2026-01-14T15:23:30.632088"
+      "updated_at": "2026-07-09T14:41:58.645933",
+      "total_defenses": 0,
+      "history": []
     },
     {
       "id": "title002",
@@ -1481,10 +1483,12 @@
       "assigned_brand": "ROC Velocity",
       "title_type": "World",
       "prestige": 85,
-      "current_holder_id": "w003",
-      "current_holder_name": "Drake Thunder",
+      "current_holder_id": null,
+      "current_holder_name": null,
       "created_at": "2026-01-14T15:23:30.632088",
-      "updated_at": "2026-01-14T15:23:30.632088"
+      "updated_at": "2026-07-09T14:41:58.645933",
+      "total_defenses": 0,
+      "history": []
     },
     {
       "id": "title008",
@@ -1492,10 +1496,12 @@
       "assigned_brand": "Cross-Brand",
       "title_type": "Women",
       "prestige": 80,
-      "current_holder_id": "w013",
-      "current_holder_name": "Luna Eclipse",
+      "current_holder_id": null,
+      "current_holder_name": null,
       "created_at": "2026-01-14T15:23:30.632088",
-      "updated_at": "2026-01-14T15:23:30.632088"
+      "updated_at": "2026-07-09T14:41:58.645933",
+      "total_defenses": 0,
+      "history": []
     },
     {
       "id": "title003",
@@ -1503,10 +1509,12 @@
       "assigned_brand": "ROC Alpha",
       "title_type": "Midcard",
       "prestige": 70,
-      "current_holder_id": "w002",
-      "current_holder_name": "Victor Reign",
+      "current_holder_id": null,
+      "current_holder_name": null,
       "created_at": "2026-01-14T15:23:30.632088",
-      "updated_at": "2026-01-14T15:23:30.632088"
+      "updated_at": "2026-07-09T14:41:58.645933",
+      "total_defenses": 0,
+      "history": []
     },
     {
       "id": "title004",
@@ -1515,9 +1523,11 @@
       "title_type": "Tag Team",
       "prestige": 65,
       "current_holder_id": null,
-      "current_holder_name": "VACANT",
+      "current_holder_name": null,
       "created_at": "2026-01-14T15:23:30.632088",
-      "updated_at": "2026-01-14T15:23:30.632088"
+      "updated_at": "2026-07-09T14:41:58.645933",
+      "total_defenses": 0,
+      "history": []
     },
     {
       "id": "title005",
@@ -1526,9 +1536,11 @@
       "title_type": "Tag Team",
       "prestige": 60,
       "current_holder_id": null,
-      "current_holder_name": "VACANT",
+      "current_holder_name": null,
       "created_at": "2026-01-14T15:23:30.632088",
-      "updated_at": "2026-01-14T15:23:30.632088"
+      "updated_at": "2026-07-09T14:41:58.645933",
+      "total_defenses": 0,
+      "history": []
     },
     {
       "id": "title006",
@@ -1536,10 +1548,12 @@
       "assigned_brand": "ROC Vanguard",
       "title_type": "Developmental",
       "prestige": 55,
-      "current_holder_id": "w032",
-      "current_holder_name": "Hunter Wolf",
+      "current_holder_id": null,
+      "current_holder_name": null,
       "created_at": "2026-01-14T15:23:30.632088",
-      "updated_at": "2026-01-14T15:23:30.632088"
+      "updated_at": "2026-07-09T14:41:58.645933",
+      "total_defenses": 0,
+      "history": []
     },
     {
       "id": "title007",
@@ -1548,9 +1562,11 @@
       "title_type": "Tag Team",
       "prestige": 50,
       "current_holder_id": null,
-      "current_holder_name": "VACANT",
+      "current_holder_name": null,
       "created_at": "2026-01-14T15:23:30.632088",
-      "updated_at": "2026-01-14T15:23:30.632088"
+      "updated_at": "2026-07-09T14:41:58.645933",
+      "total_defenses": 0,
+      "history": []
     }
   ],
   "feuds": [
@@ -54530,5 +54546,8 @@
       "last_updated": "2026-01-15T12:27:46.765980"
     }
   ],
-  "milestones": []
+  "milestones": [],
+  "title_defenses": [],
+  "title_vacancies": [],
+  "title_reign_stats": []
 }
