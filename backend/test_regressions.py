@@ -11,6 +11,7 @@ from economy.contracts import ContractManager
 from models.calendar import ScheduledShow
 from models.championship import Championship
 from models.contract import IncentiveType
+from models.match import MatchImportance
 from models.wrestler import Wrestler
 from persistence.database import Database
 from persistence.universe_db import DatabaseUniverseState
@@ -295,6 +296,12 @@ class RegressionTests(unittest.TestCase):
                 database.close()
             if os.path.exists(db_path):
                 os.remove(db_path)
+
+
+    def test_match_importance_accepts_showrunner_aliases(self):
+        self.assertEqual(MatchImportance.HIGH_DRAMA, MatchImportance('tournament'))
+        self.assertEqual(MatchImportance.HIGH_DRAMA, MatchImportance('main_event'))
+        self.assertEqual(MatchImportance.HIGH_DRAMA, MatchImportance('major'))
 
     def test_reset_all_championship_history_vacates_titles_and_stats(self):
         temp_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'test_tmp'))
