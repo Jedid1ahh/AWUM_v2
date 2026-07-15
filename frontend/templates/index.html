@@ -744,6 +744,9 @@
             <a href="#" onclick="loadView('booker');return false;">
                 <i class="bi bi-magic"></i> Booker AI
             </a>
+            <a href="#" onclick="loadView('my-inbox');return false;">
+                <i class="bi bi-inbox-fill"></i> My Inbox
+            </a>
             <a href="#" onclick="loadView('roster');return false;">
                 <i class="bi bi-people-fill"></i> Roster
             </a>
@@ -1617,8 +1620,8 @@ function showBookerApprovalPopup(item) {
         ? 'The AI may execute this if you leave it unanswered.'
         : 'Major booking calls wait for your approval or counter-pitch.';
     if (openButton) {
-        openButton.textContent = 'Open Booker AI';
-        openButton.onclick = () => { loadView('booker'); dismissDynamicEventPopup(); return false; };
+        openButton.textContent = 'Open My Inbox';
+        openButton.onclick = () => { loadView('my-inbox'); dismissDynamicEventPopup(); return false; };
     }
     backdrop.classList.add('active');
 }

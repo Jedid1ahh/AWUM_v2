@@ -192,6 +192,58 @@ class AIShowrunnerTests(unittest.TestCase):
         dark = self.service.run_dark_house_autopilot(1, 11, seed=9, force=True)
         self.assertGreaterEqual(dark["total"], 2)
 
+    def test_google_ai_studio_is_primary_when_both_provider_keys_exist(self):
+        from unittest.mock import patch
+        from services.llm_provider import LLMProvider
+
+        with patch.dict(os.environ, {"GOOGLE_AI_API_KEY": "google-key", "OPENROUTER_API_KEY": "openrouter-key"}, clear=True):
+            provider = LLMProvider()
+
+        status = provider.status()
+        self.assertEqual(status["primary"], "google")
+        self.assertEqual(status["primary_label"], "Google AI Studio")
+        self.assertIn("openrouter", status["fallback_chain"])
+
+    def test_openrouter_uses_project_default_model_fallback_order(self):
+        from unittest.mock import patch
+        from services.llm_provider import DEFAULT_OPENROUTER_MODELS, LLMProvider
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            provider = LLMProvider()
+
+        self.assertEqual(provider.openrouter_models, DEFAULT_OPENROUTER_MODELS)
+        self.assertEqual(provider.status()["openrouter_models"], DEFAULT_OPENROUTER_MODELS)
+
+    def test_openrouter_model_env_prepends_custom_model_without_losing_defaults(self):
+        from unittest.mock import patch
+        from services.llm_provider import DEFAULT_OPENROUTER_MODELS, LLMProvider
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key", "AWUM_OPENROUTER_MODEL": "custom/model:free"}, clear=True):
+            provider = LLMProvider()
+
+        self.assertEqual(provider.openrouter_models[0], "custom/model:free")
+        self.assertEqual(provider.openrouter_models[1:], DEFAULT_OPENROUTER_MODELS)
+
+
+    def test_external_llm_pitch_uses_approval_queue(self):
+        from services.llm_provider import LLMProvider, LLMProposalService
+
+        provider = LLMProvider()
+        provider.google_key = None
+        provider.openrouter_key = None
+        service = LLMProposalService(self.service, provider)
+        result = service.create_pitch(
+            "Suggest a protected promo for Alpha Ace.",
+            context={"category": "promo", "priority": "opportunity"},
+            year=1,
+            week=12,
+        )
+        approval = result["approval"]
+        self.assertEqual(approval["status"], "pending")
+        self.assertEqual(approval["source_type"], "llm_pitch")
+        inbox = self.service.inbox(status="pending", category="promo")
+        self.assertGreaterEqual(inbox["total"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
