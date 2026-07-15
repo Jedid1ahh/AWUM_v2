@@ -1272,6 +1272,7 @@
 <!-- ══════════════════════════ SCRIPTS ════════════════════════════════════ -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/static/js/api.js"></script>
+<script src="/static/js/approval_cards.js"></script>
 <script>
 // ── View loader (preserved exactly) ─────────────────────────────────────────
 async function loadView(viewName) {
@@ -1610,9 +1611,7 @@ function showBookerApprovalPopup(item) {
     ].filter(Boolean).map(value => `<span class="dynamic-event-pill">${dynamicEventHtml(value)}</span>`).join('');
 
     actions.innerHTML = `
-        <button class="dynamic-event-action" onclick="decideBookerApprovalGlobal('${dynamicEventAttr(item.id)}', 'approve')">Approve</button>
-        <button class="dynamic-event-action" onclick="decideBookerApprovalGlobal('${dynamicEventAttr(item.id)}', 'counter')">Counter</button>
-        <button class="dynamic-event-action" onclick="decideBookerApprovalGlobal('${dynamicEventAttr(item.id)}', 'reject')">Reject</button>
+        <button class="dynamic-event-action" onclick="loadView('my-inbox'); dismissDynamicEventPopup(); return false;">Open My Inbox</button>
         <button class="dynamic-event-action" onclick="dismissDynamicEventPopup()">Later</button>
     `;
 
@@ -1651,10 +1650,12 @@ function showPostShowFalloutPopup(item) {
         item.year && item.week ? `Y${item.year} W${item.week}` : ''
     ].filter(Boolean).map(value => `<span class="dynamic-event-pill">${dynamicEventHtml(value)}</span>`).join('');
 
+    const falloutDecisionId = item.approval_id || item.id;
+    const falloutDecisionFn = item.approval_id ? 'decideBookerApprovalGlobal' : 'decidePostShowFalloutGlobal';
     actions.innerHTML = `
-        <button class="dynamic-event-action" onclick="decidePostShowFalloutGlobal('${dynamicEventAttr(item.id)}', 'approve')">Approve Response</button>
-        <button class="dynamic-event-action" onclick="decidePostShowFalloutGlobal('${dynamicEventAttr(item.id)}', 'counter')">Counter</button>
-        <button class="dynamic-event-action" onclick="decidePostShowFalloutGlobal('${dynamicEventAttr(item.id)}', 'dismiss')">Later</button>
+        <button class="dynamic-event-action" onclick="${falloutDecisionFn}('${dynamicEventAttr(falloutDecisionId)}', 'approve')">Approve Response</button>
+        <button class="dynamic-event-action" onclick="${falloutDecisionFn}('${dynamicEventAttr(falloutDecisionId)}', 'counter')">Counter</button>
+        <button class="dynamic-event-action" onclick="${falloutDecisionFn}('${dynamicEventAttr(falloutDecisionId)}', 'dismiss')">Later</button>
     `;
 
     if (footer) footer.textContent = item.auto_execute_allowed
@@ -1707,16 +1708,11 @@ async function decideStoryArcReview(reviewId, decision, selectedOption) {
 
 async function decideBookerApprovalGlobal(itemId, decision) {
     try {
-        const counterPitch = decision === 'counter'
-            ? (prompt('Counter-pitch to the AI showrunner:', 'Keep the story beat, but change the finish.') || '')
-            : '';
-        const response = await fetch(`/api/booker/approval-queue/${encodeURIComponent(itemId)}/decision`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ decision, counter_pitch: counterPitch, notes: `Handled from global popup: ${decision}` })
+        await window.decideApprovalQueueItem(itemId, decision, {
+            surface: 'global popup',
+            counterPrompt: 'Counter-pitch to the AI showrunner:',
+            counterDefault: 'Keep the story beat, but change the finish.'
         });
-        const result = await response.json();
-        if (!response.ok || result.error) throw new Error(result.error || 'Could not resolve Booker AI item');
         dismissDynamicEventPopup();
         checkBookerAIPulse('post-booker-decision', true);
     } catch (error) {

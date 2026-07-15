@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from repositories.phase_expansion_repository import PhaseExpansionRepository, new_id
+from services.llm_tools import brand_matches
 
 
 ANGLE_LIBRARY_SEEDS = [
@@ -33,6 +34,7 @@ class AIShowrunnerService:
         self.repo = PhaseExpansionRepository(database)
         self.conn = database.conn
         self._tables_ready = False
+        self._approved_materializers = self._build_approved_materializer_registry()
 
     def now(self) -> str:
         return datetime.now().isoformat()
@@ -279,29 +281,50 @@ class AIShowrunnerService:
         row = self.repo.fetch_one("SELECT * FROM booker_approval_queue WHERE id = ?", (approval_id,))
         return self._decode_queue(row)
 
+    def _build_approved_materializer_registry(self) -> dict[str, Any]:
+        return {
+            "war_games": self._materialize_war_games_approval,
+            "crown_tournament": self._materialize_crown_approval,
+            "mitb_cash_in": self._materialize_mitb_approval,
+            "living_story_ai": self._materialize_living_story_approval,
+            "llm_pitch": self._materialize_llm_approval,
+            "llm_match": self._materialize_llm_approval,
+            "llm_promo": self._materialize_llm_approval,
+            "llm_segment": self._materialize_llm_approval,
+            "llm_feud_payoff": self._materialize_llm_approval,
+        }
+
     def _execute_approved_world_change(self, approval_row: dict) -> None:
-        """Materialize approval-queue items that should change persistent game state."""
+        """Materialize approval-queue items through the registry, not a growing branch chain."""
         try:
             item = self._decode_queue(dict(approval_row))
-            recommendation = item.get("recommendation_json") or {}
-            if item.get("source_type") == "war_games":
-                self._materialize_war_games_factions(recommendation.get("war_games") or {})
-            elif item.get("source_type") == "crown_tournament":
-                self._materialize_crown_payoff_decision(recommendation.get("crown") or {}, approved=True)
-            elif item.get("source_type") == "mitb_cash_in":
-                self._materialize_mitb_cash_in_decision(recommendation.get("cash_in") or {}, approved=True)
-            elif item.get("source_type") == "living_story_ai":
-                arc = recommendation.get("living_arc") or {}
-                if arc.get("arc_type") == "faction_formation_betrayal_seed":
-                    self._materialize_living_arc_faction(arc)
-                elif arc.get("arc_type") == "alignment_turn":
-                    self._materialize_alignment_turn(arc)
-            elif recommendation.get("llm_proposal"):
-                self._materialize_llm_proposal(item, recommendation.get("llm_proposal") or {})
+            materializer = self._approved_materializers.get(item.get("source_type")) or self._approved_materializers.get(item.get("category"))
+            if materializer:
+                materializer(item)
         except Exception:
             # Approval decisions should still persist even if optional world materialization fails.
             pass
 
+    def _materialize_war_games_approval(self, item: dict) -> None:
+        self._materialize_war_games_factions((item.get("recommendation_json") or {}).get("war_games") or {})
+
+    def _materialize_crown_approval(self, item: dict) -> None:
+        self._materialize_crown_payoff_decision((item.get("recommendation_json") or {}).get("crown") or {}, approved=True)
+
+    def _materialize_mitb_approval(self, item: dict) -> None:
+        self._materialize_mitb_cash_in_decision((item.get("recommendation_json") or {}).get("cash_in") or {}, approved=True)
+
+    def _materialize_living_story_approval(self, item: dict) -> None:
+        arc = (item.get("recommendation_json") or {}).get("living_arc") or {}
+        if arc.get("arc_type") == "faction_formation_betrayal_seed":
+            self._materialize_living_arc_faction(arc)
+        elif arc.get("arc_type") == "alignment_turn":
+            self._materialize_alignment_turn(arc)
+
+    def _materialize_llm_approval(self, item: dict) -> None:
+        proposal = (item.get("recommendation_json") or {}).get("llm_proposal") or {}
+        if proposal:
+            self._materialize_llm_proposal(item, proposal)
 
     def _materialize_llm_proposal(self, approval_item: dict, proposal: dict) -> dict:
         """Execute an approved LLM proposal through existing game tables.
@@ -440,7 +463,7 @@ class AIShowrunnerService:
         constraints = proposal.get("constraints") or {}
         brand = constraints.get("brand") or proposal.get("target_brand")
         if brand:
-            bad_brand = sorted(row["name"] for row in rows if not self._brand_matches(row.get("primary_brand"), brand))
+            bad_brand = sorted(row["name"] for row in rows if not brand_matches(row.get("primary_brand"), brand))
             if bad_brand:
                 return {"error": "wrong_brand", "requested_brand": brand, "wrestlers": bad_brand}
         gender = constraints.get("gender") or proposal.get("target_gender")
@@ -454,20 +477,6 @@ class AIShowrunnerService:
             if len(genders) > 1:
                 return {"error": "intergender_match_blocked", "message": "Showrunner AI may not book intergender matches."}
         return None
-
-    def _brand_matches(self, wrestler_brand: Any, requested_brand: Any) -> bool:
-        if not requested_brand:
-            return True
-        raw = str(wrestler_brand or "").lower()
-        requested = str(requested_brand or "").lower()
-        def normalize(value: str) -> str:
-            value = re.sub(r"\b(roc|brand|weekly|show)\b", " ", value)
-            return re.sub(r"[^a-z0-9]+", " ", value).strip()
-        raw_norm = normalize(raw)
-        requested_norm = normalize(requested)
-        if not raw_norm or not requested_norm:
-            return False
-        return raw_norm == requested_norm or requested_norm in raw_norm.split() or requested_norm in raw_norm or raw_norm in requested_norm
 
     def _proposal_referenced_names_from_payload(self, proposal: dict) -> list[str]:
         referenced = set()

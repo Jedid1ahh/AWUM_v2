@@ -667,7 +667,7 @@
                 return '<li>' + recapHtml(action) + '</li>';
             }).join('');
             var buttons = item.status === 'open'
-                ? '<div class="btn-group btn-group-sm mt-3 post-fallout-actions" data-item-id="' + recapAttr(item.id) + '">' +
+                ? '<div class="btn-group btn-group-sm mt-3 post-fallout-actions" data-item-id="' + recapAttr(item.id) + '" data-approval-id="' + recapAttr(item.approval_id || '') + '">' +
                     '<button type="button" class="btn btn-outline-success" data-fallout-decision="approve">Approve</button>' +
                     '<button type="button" class="btn btn-outline-primary" data-fallout-decision="counter">Counter</button>' +
                     '<button type="button" class="btn btn-outline-secondary" data-fallout-decision="dismiss">Dismiss</button>' +
@@ -1797,6 +1797,20 @@
         var group = btn.closest('.post-fallout-actions');
         if (!group) return;
         event.preventDefault();
+        var approvalId = group.getAttribute('data-approval-id');
+        if (approvalId) {
+            window.decideApprovalQueueItem(approvalId, btn.getAttribute('data-fallout-decision'), {
+                surface: 'Post-show recap',
+                counterPrompt: 'Counter-pitch this fallout response:',
+                counterDefault: 'Keep the consequence, but adjust next week\'s creative direction.'
+            }).then(function() {
+                if (window.showToast) showToast('Post-show approval updated', 'success');
+                loadPersistentPostShowFallout(true);
+            }).catch(function(error) {
+                if (window.showToast) showToast('Fallout approval failed: ' + error.message, 'danger');
+            });
+            return;
+        }
         window.decidePostShowFalloutItem(group.getAttribute('data-item-id'), btn.getAttribute('data-fallout-decision'));
     });
 

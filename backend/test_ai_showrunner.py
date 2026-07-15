@@ -370,6 +370,42 @@ class AIShowrunnerTests(unittest.TestCase):
         self.assertIsNotNone(promise)
         self.assertEqual(promise["promise_type"], "push")
 
+    def test_materializer_registry_dispatches_llm_approval(self):
+        self.assertIn("llm_pitch", self.service._approved_materializers)
+        approval = self.service.queue_external_item(
+            1,
+            20,
+            "llm_pitch",
+            "registry_pitch",
+            "promo",
+            "high",
+            "Promo beat: Alpha Ace and Beta Brawler",
+            "A grounded promo beat to verify registry dispatch.",
+            {
+                "llm_proposal": {
+                    "title": "Promo beat: Alpha Ace and Beta Brawler",
+                    "summary": "Alpha Ace and Beta Brawler argue before the main event.",
+                    "proposal_type": "promo",
+                    "referenced_wrestlers": ["Alpha Ace", "Beta Brawler"],
+                }
+            },
+            "ask",
+        )
+
+        self.service.decide_approval(approval["id"], {"decision": "approve"})
+        execution = self.database.conn.execute(
+            "SELECT * FROM llm_proposal_executions WHERE approval_id = ?",
+            (approval["id"],),
+        ).fetchone()
+        self.assertEqual(execution["status"], "executed")
+
+    def test_shared_brand_tool_matches_roc_alpha_labels(self):
+        from services.llm_tools import brand_matches
+
+        self.assertTrue(brand_matches("ROC Alpha", "Alpha brand"))
+        self.assertTrue(brand_matches("ROC Alpha Weekly", "Alpha"))
+        self.assertFalse(brand_matches("Velocity", "Alpha"))
+
     def test_llm_pitch_respects_requested_brand_and_gender_constraints(self):
         from services.llm_provider import LLMProposalService
 

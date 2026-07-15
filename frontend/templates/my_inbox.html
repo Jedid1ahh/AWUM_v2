@@ -81,24 +81,13 @@
       list.innerHTML = '<div class="card"><div class="card-body text-muted">No approval items match this filter.</div></div>';
       return;
     }
-    list.innerHTML = items.map(item => {
-      var recommendation = item.recommendation_json || {};
-      return `<div class="approval-card">
-        <div class="d-flex justify-content-between gap-2">
-          <div class="approval-title">${esc(item.title)}</div>
-          ${badge(item.priority)}
-        </div>
-        <div class="approval-meta mb-2">${esc(item.source_type)} · ${esc(item.category)} · ${esc(item.status)} · due Y${esc(item.deadline_year || '-')} W${esc(item.deadline_week || '-')}</div>
-        <p>${esc(item.summary)}</p>
-        <details class="mb-3"><summary>Recommendation data</summary><pre class="json-preview">${esc(JSON.stringify(recommendation, null, 2))}</pre></details>
-        ${item.status === 'pending' ? `<div class="btn-group btn-group-sm">
-          <button class="btn btn-success" onclick="window.decideMyInbox('${esc(item.id)}','approve')">Approve</button>
-          <button class="btn btn-warning" onclick="window.decideMyInbox('${esc(item.id)}','counter')">Counter</button>
-          <button class="btn btn-danger" onclick="window.decideMyInbox('${esc(item.id)}','reject')">Reject</button>
-          <button class="btn btn-outline-secondary" onclick="window.decideMyInbox('${esc(item.id)}','dismiss')">Dismiss</button>
-        </div>` : '<span class="badge bg-secondary">Resolved</span>'}
-      </div>`;
-    }).join('');
+    list.innerHTML = items.map(item => window.renderApprovalCard(item, {
+      cardClass: 'approval-card',
+      titleClass: 'approval-title',
+      metaClass: 'approval-meta',
+      decisionFn: 'decideMyInbox',
+      showRecommendation: true
+    })).join('');
   }
   window.loadMyInbox = async function() {
     var status = document.getElementById('myInboxStatus').value;
@@ -107,10 +96,10 @@
     renderItems(data.items || []);
   };
   window.decideMyInbox = async function(id, decision) {
-    var counter = decision === 'counter' ? (prompt('Counter-pitch:', 'Keep the idea, but adjust the execution.') || '') : '';
-    await fetchAPI('/api/booker/approval-queue/' + encodeURIComponent(id) + '/decision', {
-      method: 'POST',
-      body: JSON.stringify({ decision, counter_pitch: counter, notes: 'Handled from My Inbox: ' + decision })
+    await window.decideApprovalQueueItem(id, decision, {
+      surface: 'My Inbox',
+      counterPrompt: 'Counter-pitch:',
+      counterDefault: 'Keep the idea, but adjust the execution.'
     });
     setBanner('Updated approval item.', 'success');
     await window.loadMyInbox();

@@ -8,6 +8,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
+from services.llm_tools import active_feuds, active_roster, brand_matches
+
 
 class LLMProviderError(RuntimeError):
     """Raised when no configured LLM provider can return a usable response."""
@@ -317,38 +319,12 @@ class LLMProposalService:
         conn = getattr(getattr(self.showrunner, "database", None), "conn", None)
         if conn is None:
             return {"active_roster": [], "active_roster_names": [], "active_feuds": []}
-        roster = []
         try:
-            rows = conn.execute(
-                """
-                SELECT id, name, gender, role, primary_brand, popularity, momentum, morale
-                FROM wrestlers
-                WHERE COALESCE(is_retired, 0) = 0
-                ORDER BY popularity DESC, momentum DESC, name
-                LIMIT 40
-                """
-            ).fetchall()
-            roster = [dict(row) for row in rows]
+            roster = active_roster(conn, limit=80)
         except Exception:
             roster = []
-        feuds = []
         try:
-            rows = conn.execute(
-                """
-                SELECT id, participant_names, intensity, status, match_count
-                FROM feuds
-                WHERE status != 'resolved'
-                ORDER BY intensity DESC, match_count DESC
-                LIMIT 12
-                """
-            ).fetchall()
-            for row in rows:
-                feud = dict(row)
-                try:
-                    feud["participant_names"] = json.loads(feud.get("participant_names") or "[]")
-                except Exception:
-                    feud["participant_names"] = []
-                feuds.append(feud)
+            feuds = active_feuds(conn, limit=20)
         except Exception:
             feuds = []
         return {
@@ -383,25 +359,11 @@ class LLMProposalService:
         filtered = list(roster)
         brand = constraints.get("brand")
         if brand:
-            filtered = [row for row in filtered if self._brand_matches(row.get("primary_brand"), brand)]
+            filtered = [row for row in filtered if brand_matches(row.get("primary_brand"), brand)]
         gender = constraints.get("gender")
         if gender:
             filtered = [row for row in filtered if str(row.get("gender") or "").lower() == str(gender).lower()]
         return filtered
-
-    def _brand_matches(self, wrestler_brand: Any, requested_brand: Any) -> bool:
-        if not requested_brand:
-            return True
-        raw = str(wrestler_brand or "").lower()
-        requested = str(requested_brand or "").lower()
-        def normalize(value: str) -> str:
-            value = re.sub(r"\b(roc|brand|weekly|show)\b", " ", value)
-            return re.sub(r"[^a-z0-9]+", " ", value).strip()
-        raw_norm = normalize(raw)
-        requested_norm = normalize(requested)
-        if not raw_norm or not requested_norm:
-            return False
-        return raw_norm == requested_norm or requested_norm in raw_norm.split() or requested_norm in raw_norm or raw_norm in requested_norm
 
     def _validate_proposal_grounding(self, proposal: dict[str, Any], game_context: dict[str, Any], constraints: dict[str, Any] | None = None) -> None:
         constraints = constraints or {}
@@ -422,7 +384,7 @@ class LLMProposalService:
         requested_brand = constraints.get("brand")
         if requested_brand:
             for row in referenced_rows:
-                if not self._brand_matches(row.get("primary_brand"), requested_brand):
+                if not brand_matches(row.get("primary_brand"), requested_brand):
                     bad_brand.append(row.get("name"))
         if bad_brand:
             raise LLMProviderError(f"LLM proposal used wrestler(s) outside requested {requested_brand} brand: {', '.join(bad_brand)}")
