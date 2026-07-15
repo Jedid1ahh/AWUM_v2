@@ -50,10 +50,18 @@ class LLMProvider:
         self.timeout = float(os.environ.get("AWUM_LLM_TIMEOUT_SECONDS", "20"))
 
     def status(self) -> dict[str, Any]:
+        primary = "google" if self.google_key else ("openrouter" if self.openrouter_key else "local_fallback")
+        fallback_chain = []
+        if self.google_key and self.openrouter_key:
+            fallback_chain.append("openrouter")
+        if primary != "local_fallback":
+            fallback_chain.append("local_fallback")
         return {
             "google_configured": bool(self.google_key),
             "openrouter_configured": bool(self.openrouter_key),
-            "primary": "google" if self.google_key else ("openrouter" if self.openrouter_key else "local_fallback"),
+            "primary": primary,
+            "primary_label": "Google AI Studio" if primary == "google" else ("OpenRouter" if primary == "openrouter" else "Local fallback"),
+            "fallback_chain": fallback_chain,
             "google_model": self.google_model,
             "openrouter_model": self.openrouter_model,
             "openrouter_models": self.openrouter_models,

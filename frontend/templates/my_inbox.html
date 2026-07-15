@@ -135,7 +135,10 @@
   async function loadProviderStatus() {
     try {
       var status = unwrap(await fetchAPI('/api/booker/llm/status'));
-      document.getElementById('llmProviderStatus').textContent = 'Provider: ' + status.primary + (status.openrouter_models && status.openrouter_models.length ? ' · OR: ' + status.openrouter_models[0] + ' +' + Math.max(0, status.openrouter_models.length - 1) : '');
+      var fallbackText = status.openrouter_configured && status.openrouter_models && status.openrouter_models.length
+        ? ' · fallback: OpenRouter ' + status.openrouter_models[0] + ' +' + Math.max(0, status.openrouter_models.length - 1)
+        : '';
+      document.getElementById('llmProviderStatus').textContent = 'Primary: ' + (status.primary_label || status.primary) + fallbackText;
     } catch (err) {
       document.getElementById('llmProviderStatus').textContent = 'Provider unavailable';
     }
