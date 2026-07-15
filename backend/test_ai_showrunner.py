@@ -192,6 +192,25 @@ class AIShowrunnerTests(unittest.TestCase):
         dark = self.service.run_dark_house_autopilot(1, 11, seed=9, force=True)
         self.assertGreaterEqual(dark["total"], 2)
 
+    def test_external_llm_pitch_uses_approval_queue(self):
+        from services.llm_provider import LLMProvider, LLMProposalService
+
+        provider = LLMProvider()
+        provider.google_key = None
+        provider.openrouter_key = None
+        service = LLMProposalService(self.service, provider)
+        result = service.create_pitch(
+            "Suggest a protected promo for Alpha Ace.",
+            context={"category": "promo", "priority": "opportunity"},
+            year=1,
+            week=12,
+        )
+        approval = result["approval"]
+        self.assertEqual(approval["status"], "pending")
+        self.assertEqual(approval["source_type"], "llm_pitch")
+        inbox = self.service.inbox(status="pending", category="promo")
+        self.assertGreaterEqual(inbox["total"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
