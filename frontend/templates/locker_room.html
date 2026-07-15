@@ -440,10 +440,16 @@ async function loadRecoveryNeeded() {
                                     ? '<span class="text-success">✅</span>'
                                     : '<span class="text-danger">❌</span>'}</td>
                                 <td>
-                                    <button class="btn btn-sm btn-outline-light"
-                                        onclick="openQuickActionModal('${escAttr(w.wrestler_id)}')">
-                                        Recover
-                                    </button>
+                                    <div class="btn-group btn-group-sm" role="group" aria-label="Talent actions">
+                                        <button class="btn btn-outline-light"
+                                            onclick="openQuickActionModal('${escAttr(w.wrestler_id)}')">
+                                            Recover
+                                        </button>
+                                        <button class="btn btn-outline-info"
+                                            onclick="openTalentChat('${escAttr(w.wrestler_id)}', '${escAttr(w.wrestler_name)}')">
+                                            Talk
+                                        </button>
+                                    </div>
                                 </td>
                             </tr>`).join('')}
                     </tbody>
@@ -525,6 +531,27 @@ async function openQuickActionModal(wrestlerId) {
     } catch(e) {
         document.getElementById('qaModalBody').innerHTML =
             `<p class="text-danger">Error: ${escHtml(e.message)}</p>`;
+    }
+}
+
+async function openTalentChat(wrestlerId, wrestlerName) {
+    const message = window.prompt(`Talk to ${wrestlerName}. What do you want to say?`, 'I want to push you in 2 days.');
+    if (!message || !message.trim()) return;
+    try {
+        const res = await fetch(`${BASE}/api/talent-chat/${encodeURIComponent(wrestlerId)}/message`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Talent chat failed');
+        const promiseLine = data.promise_created
+            ? `\n\nPromise tracked: ${data.promise.promise_type.replace(/_/g, ' ')} due in ${data.promise.deadline_weeks} week(s).`
+            : '';
+        window.alert(`${data.wrestler_name} (${data.stage}, morale ${data.morale}):\n\n${data.reply}${promiseLine}`);
+        loadRecoveryNeeded();
+    } catch (e) {
+        showToast('❌', e.message, 'danger');
     }
 }
 

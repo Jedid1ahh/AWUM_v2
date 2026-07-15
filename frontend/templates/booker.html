@@ -16,6 +16,9 @@
       <button class="btn btn-primary btn-sm" onclick="window.runShowrunnerWeek(false)">
         <i class="bi bi-play-fill"></i> Run AI Week
       </button>
+      <button class="btn btn-outline-warning btn-sm" onclick="window.createBookerLLMPitch()">
+        <i class="bi bi-stars"></i> AI Pitch (LLM)
+      </button>
       <button class="btn btn-outline-danger btn-sm" onclick="window.runShowrunnerWeek(true)">
         <i class="bi bi-arrow-repeat"></i> Force Rebook
       </button>
@@ -186,21 +189,12 @@
       el.innerHTML = '<p class="text-muted mb-0">No pending approvals. The AI has room to breathe.</p>';
       return;
     }
-    el.innerHTML = items.map(item => `
-      <div class="decision-card">
-        <div class="d-flex justify-content-between gap-2">
-          <div class="decision-title">${esc(item.title)}</div>
-          ${badge(item.priority)}
-        </div>
-        <div class="decision-meta mb-2">${esc(item.category)} | ${esc(item.autonomy_policy)} | due Y${item.deadline_year || '-'} W${item.deadline_week || '-'}</div>
-        <p class="mb-2">${esc(item.summary)}</p>
-        <div class="btn-group btn-group-sm">
-          <button class="btn btn-success" onclick="window.decideBookerApproval('${item.id}','approve')">Approve</button>
-          <button class="btn btn-warning" onclick="window.decideBookerApproval('${item.id}','counter')">Counter</button>
-          <button class="btn btn-danger" onclick="window.decideBookerApproval('${item.id}','reject')">Reject</button>
-          <button class="btn btn-outline-secondary" onclick="window.decideBookerApproval('${item.id}','dismiss')">Dismiss</button>
-        </div>
-      </div>`).join('');
+    el.innerHTML = items.map(item => window.renderApprovalCard(item, {
+      cardClass: 'decision-card',
+      titleClass: 'decision-title',
+      metaClass: 'decision-meta',
+      decisionFn: 'decideBookerApproval'
+    })).join('');
   }
 
   function renderRoadmaps(roadmaps) {
@@ -322,15 +316,35 @@
   };
 
   window.decideBookerApproval = async function(id, decision) {
-    var counter = '';
-    if (decision === 'counter') {
-      counter = prompt('Counter-pitch to the AI showrunner:', 'Change the winner, but keep the story beat alive.') || '';
+    try {
+      await window.decideApprovalQueueItem(id, decision, {
+        surface: 'Booker page',
+        counterPrompt: 'Counter-pitch to the AI showrunner:',
+        counterDefault: 'Change the winner, but keep the story beat alive.'
+      });
+      if (window.showToast) showToast('Booker approval updated', 'success');
+      await window.loadShowrunnerDashboard();
+    } catch (err) {
+      if (window.showToast) showToast(err.message || String(err), 'danger');
+      else alert(err.message || String(err));
     }
-    await fetchAPI(`/api/booker/approval-queue/${id}/decision`, {
-      method: 'POST',
-      body: JSON.stringify({ decision, counter_pitch: counter, notes: `Handled from Booker page: ${decision}` })
-    });
-    await window.loadShowrunnerDashboard();
+  };
+
+  window.createBookerLLMPitch = async function() {
+    var promptText = prompt('What should the LLM pitch?', 'Suggest one strong match, feud payoff, promo, segment, or finance move for my current week.');
+    if (!promptText) return;
+    setRunStatus('<span class="spinner-border spinner-border-sm me-2"></span>Creating LLM pitch...', 'info');
+    try {
+      var result = unwrap(await fetchAPI('/api/booker/llm/proposals', {
+        method: 'POST',
+        body: JSON.stringify({ prompt: promptText, context: { source_page: 'booker' } })
+      }));
+      setRunStatus(`LLM pitch queued: <strong>${esc((result.approval || {}).title || 'AI Pitch')}</strong>`, 'success');
+      if (window.showToast) showToast('LLM pitch added to inbox', 'success');
+      await window.loadShowrunnerDashboard();
+    } catch (err) {
+      setRunStatus(`<strong>LLM pitch failed:</strong> ${esc(err.message || err)}`, 'danger');
+    }
   };
 
   window.autoResolveBookerQueue = async function() {

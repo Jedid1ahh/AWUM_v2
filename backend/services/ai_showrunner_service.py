@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from repositories.phase_expansion_repository import PhaseExpansionRepository, new_id
+from services.llm_tools import brand_matches
 
 
 ANGLE_LIBRARY_SEEDS = [
@@ -33,6 +34,7 @@ class AIShowrunnerService:
         self.repo = PhaseExpansionRepository(database)
         self.conn = database.conn
         self._tables_ready = False
+        self._approved_materializers = self._build_approved_materializer_registry()
 
     def now(self) -> str:
         return datetime.now().isoformat()
@@ -52,6 +54,7 @@ class AIShowrunnerService:
         )
         if last_run:
             self._decode_run(last_run)
+            self._append_approved_llm_segments_to_card(last_run.get("generated_card_json") or {}, last_run.get("show_id"))
         special = self._special_system_snapshot()
         return {
             "summary": {
@@ -72,6 +75,71 @@ class AIShowrunnerService:
             "special_systems": special,
             "last_run": last_run,
         }
+
+
+    def queue_external_item(
+        self,
+        year: int,
+        week: int,
+        source_type: str,
+        source_id: str,
+        category: str,
+        priority: str,
+        title: str,
+        summary: str,
+        recommendation: dict,
+        policy: str = "ask",
+        auto_week: int | None = None,
+    ) -> dict:
+        """Public, canonical enqueue method for LLM and cross-system proposals."""
+        self._ensure_tables()
+        return self._queue_item(
+            year,
+            week,
+            source_type,
+            source_id,
+            category,
+            priority,
+            title,
+            summary,
+            recommendation,
+            policy,
+            auto_week,
+        )
+
+    def inbox(self, status: str | None = "pending", limit: int = 100, category: str | None = None) -> dict:
+        """Return approval queue rows for the dedicated My Inbox page/API."""
+        self._ensure_tables()
+        if category:
+            if status:
+                rows = self.repo.fetch_all(
+                    """
+                    SELECT * FROM booker_approval_queue
+                    WHERE status = ? AND category = ? AND deleted_at IS NULL
+                    ORDER BY CASE priority
+                        WHEN 'critical' THEN 0 WHEN 'urgent' THEN 1 WHEN 'high' THEN 2
+                        WHEN 'opportunity' THEN 3 WHEN 'medium' THEN 4 ELSE 5 END, created_at DESC
+                    LIMIT ?
+                    """,
+                    (status, category, int(limit)),
+                )
+            else:
+                rows = self.repo.fetch_all(
+                    """
+                    SELECT * FROM booker_approval_queue
+                    WHERE category = ? AND deleted_at IS NULL
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (category, int(limit)),
+                )
+        else:
+            rows = self._queue_rows(status, int(limit))
+        items = [self._decode_queue(row) for row in rows]
+        counts = {}
+        for item in items:
+            counts[item.get("category") or "uncategorized"] = counts.get(item.get("category") or "uncategorized", 0) + 1
+        return {"total": len(items), "items": items, "counts_by_category": counts}
 
     def run_weekly(self, year: int, week: int, universe=None, seed: int | None = None, force: bool = False, autonomy_level: str = "balanced") -> dict:
         self._ensure_tables()
@@ -213,26 +281,229 @@ class AIShowrunnerService:
         row = self.repo.fetch_one("SELECT * FROM booker_approval_queue WHERE id = ?", (approval_id,))
         return self._decode_queue(row)
 
+    def _build_approved_materializer_registry(self) -> dict[str, Any]:
+        return {
+            "war_games": self._materialize_war_games_approval,
+            "crown_tournament": self._materialize_crown_approval,
+            "mitb_cash_in": self._materialize_mitb_approval,
+            "living_story_ai": self._materialize_living_story_approval,
+            "llm_pitch": self._materialize_llm_approval,
+            "llm_match": self._materialize_llm_approval,
+            "llm_promo": self._materialize_llm_approval,
+            "llm_segment": self._materialize_llm_approval,
+            "llm_feud_payoff": self._materialize_llm_approval,
+        }
+
     def _execute_approved_world_change(self, approval_row: dict) -> None:
-        """Materialize approval-queue items that should change persistent game state."""
+        """Materialize approval-queue items through the registry, not a growing branch chain."""
         try:
             item = self._decode_queue(dict(approval_row))
-            recommendation = item.get("recommendation_json") or {}
-            if item.get("source_type") == "war_games":
-                self._materialize_war_games_factions(recommendation.get("war_games") or {})
-            elif item.get("source_type") == "crown_tournament":
-                self._materialize_crown_payoff_decision(recommendation.get("crown") or {}, approved=True)
-            elif item.get("source_type") == "mitb_cash_in":
-                self._materialize_mitb_cash_in_decision(recommendation.get("cash_in") or {}, approved=True)
-            elif item.get("source_type") == "living_story_ai":
-                arc = recommendation.get("living_arc") or {}
-                if arc.get("arc_type") == "faction_formation_betrayal_seed":
-                    self._materialize_living_arc_faction(arc)
-                elif arc.get("arc_type") == "alignment_turn":
-                    self._materialize_alignment_turn(arc)
+            materializer = self._approved_materializers.get(item.get("source_type")) or self._approved_materializers.get(item.get("category"))
+            if materializer:
+                materializer(item)
         except Exception:
             # Approval decisions should still persist even if optional world materialization fails.
             pass
+
+    def _materialize_war_games_approval(self, item: dict) -> None:
+        self._materialize_war_games_factions((item.get("recommendation_json") or {}).get("war_games") or {})
+
+    def _materialize_crown_approval(self, item: dict) -> None:
+        self._materialize_crown_payoff_decision((item.get("recommendation_json") or {}).get("crown") or {}, approved=True)
+
+    def _materialize_mitb_approval(self, item: dict) -> None:
+        self._materialize_mitb_cash_in_decision((item.get("recommendation_json") or {}).get("cash_in") or {}, approved=True)
+
+    def _materialize_living_story_approval(self, item: dict) -> None:
+        arc = (item.get("recommendation_json") or {}).get("living_arc") or {}
+        if arc.get("arc_type") == "faction_formation_betrayal_seed":
+            self._materialize_living_arc_faction(arc)
+        elif arc.get("arc_type") == "alignment_turn":
+            self._materialize_alignment_turn(arc)
+
+    def _materialize_llm_approval(self, item: dict) -> None:
+        proposal = (item.get("recommendation_json") or {}).get("llm_proposal") or {}
+        if proposal:
+            self._materialize_llm_proposal(item, proposal)
+
+    def _materialize_llm_proposal(self, approval_item: dict, proposal: dict) -> dict:
+        """Execute an approved LLM proposal through existing game tables.
+
+        LLMs are allowed to suggest, not directly mutate arbitrary state. This
+        executor validates every referenced wrestler against the live roster and
+        then stores booking-facing proposals as normal booking segments so the
+        player's existing show/card surfaces can consume the approved item.
+        """
+        self._ensure_llm_execution_table()
+        grounding_error = self._llm_execution_grounding_error(proposal)
+        if grounding_error:
+            return self._record_llm_execution(
+                approval_item,
+                proposal,
+                "blocked",
+                grounding_error,
+            )
+
+        proposal_type = str(proposal.get("proposal_type") or proposal.get("type") or approval_item.get("category") or "segment").lower()
+        result = {"proposal_type": proposal_type}
+        if proposal_type in {"match", "feud", "feud_payoff", "segment", "promo", "promo_beat", "weekly_card"}:
+            segment = self._insert_llm_booking_segment(approval_item, proposal, proposal_type)
+            result.update({"booking_segment_id": segment["id"], "show_id": segment["show_id"]})
+        else:
+            result["note"] = "Approved LLM proposal recorded for audit; no dedicated executor exists yet."
+        return self._record_llm_execution(approval_item, proposal, "executed", result)
+
+    def _insert_llm_booking_segment(self, approval_item: dict, proposal: dict, proposal_type: str) -> dict:
+        year = int(approval_item.get("year") or approval_item.get("deadline_year") or 1)
+        week = int(approval_item.get("week") or approval_item.get("deadline_week") or 1)
+        latest_run = self.repo.fetch_one(
+            """
+            SELECT show_id, show_name, brand, year, week
+            FROM ai_showrunner_runs
+            WHERE deleted_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        )
+        if latest_run and not proposal.get("target_show_id"):
+            show = {
+                "show_id": latest_run["show_id"],
+                "name": latest_run["show_name"],
+                "brand": latest_run["brand"],
+                "show_type": "weekly_tv",
+                "is_ppv": False,
+            }
+            year = int(latest_run.get("year") or year)
+            week = int(latest_run.get("week") or week)
+        else:
+            show = self._current_show(None, year, week)
+        constraints = proposal.get("constraints") or {}
+        if constraints.get("brand"):
+            show = {**show, "brand": constraints.get("brand"), "name": proposal.get("target_show_name") or f"ROC {constraints.get('brand')} Weekly"}
+        now = self.now()
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO booking_show_plans (
+                show_id, show_name, brand, show_type, year, week, total_runtime_minutes,
+                network_break_count, accept_overrun, warnings, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                show["show_id"], show["name"], show.get("brand", "Cross-Brand"), show.get("show_type", "weekly_tv"),
+                year, week, 120 if not show.get("is_ppv") else 180, 8 if show.get("show_type") == "weekly_tv" else 0, 1,
+                json.dumps(["Contains approved LLM proposal."]), now, now,
+            ),
+        )
+        existing = self.repo.fetch_one(
+            "SELECT COALESCE(MAX(card_position), 0) AS max_position FROM booking_segments WHERE show_id = ? AND deleted_at IS NULL",
+            (show["show_id"],),
+        )
+        position = int((existing or {}).get("max_position") or 0) + 1
+        segment_id = new_id("llmseg")
+        duration = 12 if proposal_type in {"match", "feud", "feud_payoff"} else 6
+        self.conn.execute(
+            """
+            INSERT INTO booking_segments (
+                id, show_id, source_item_id, item_type, segment_type, card_position,
+                planned_start_minute, planned_duration_minutes, allocation_status,
+                expected_min_minutes, expected_max_minutes, is_main_event, quality_score,
+                crowd_heat_score, payload_json, created_at, updated_at, deleted_at
+            ) VALUES (?, ?, ?, 'llm_approved', ?, ?, ?, ?, 'approved_llm', ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                segment_id, show["show_id"], approval_item.get("id"), proposal_type, position, max(0, (position - 1) * duration),
+                duration, max(1, duration - 3), duration + 5, 1 if proposal_type == "feud_payoff" else 0,
+                70, 70, json.dumps({"approval": approval_item, "proposal": proposal}), now, now,
+            ),
+        )
+        self.conn.commit()
+        return {"id": segment_id, "show_id": show["show_id"], "card_position": position}
+
+    def _ensure_llm_execution_table(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_proposal_executions (
+                id TEXT PRIMARY KEY,
+                approval_id TEXT NOT NULL,
+                proposal_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                result_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.commit()
+
+    def _record_llm_execution(self, approval_item: dict, proposal: dict, status: str, result: dict) -> dict:
+        row = {
+            "id": new_id("llmexec"),
+            "approval_id": approval_item.get("id"),
+            "proposal_type": str(proposal.get("proposal_type") or proposal.get("type") or approval_item.get("category") or "unknown"),
+            "status": status,
+            "result": result,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO llm_proposal_executions (id, approval_id, proposal_type, status, result_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (row["id"], row["approval_id"], row["proposal_type"], row["status"], json.dumps(result), self.now()),
+        )
+        self.conn.commit()
+        return row
+
+    def _llm_execution_grounding_error(self, proposal: dict) -> dict | None:
+        roster_rows = self.repo.fetch_all("SELECT id, name, gender, primary_brand FROM wrestlers WHERE COALESCE(is_retired, 0) = 0")
+        roster = {row["name"]: row for row in roster_rows}
+        names = self._proposal_referenced_names_from_payload(proposal)
+        unknown = sorted(name for name in names if name and name not in roster)
+        if unknown:
+            return {"error": "unknown_wrestlers", "unknown_wrestlers": unknown}
+        rows = [roster[name] for name in names if name in roster]
+        constraints = proposal.get("constraints") or {}
+        brand = constraints.get("brand") or proposal.get("target_brand")
+        if brand:
+            bad_brand = sorted(row["name"] for row in rows if not brand_matches(row.get("primary_brand"), brand))
+            if bad_brand:
+                return {"error": "wrong_brand", "requested_brand": brand, "wrestlers": bad_brand}
+        gender = constraints.get("gender") or proposal.get("target_gender")
+        if gender:
+            bad_gender = sorted(row["name"] for row in rows if str(row.get("gender") or "").lower() != str(gender).lower())
+            if bad_gender:
+                return {"error": "wrong_gender", "requested_gender": gender, "wrestlers": bad_gender}
+        proposal_type = str(proposal.get("proposal_type") or proposal.get("type") or "").lower()
+        if proposal_type in {"match", "feud_payoff"}:
+            genders = {str(row.get("gender") or "").lower() for row in rows if row.get("gender")}
+            if len(genders) > 1:
+                return {"error": "intergender_match_blocked", "message": "Showrunner AI may not book intergender matches."}
+        return None
+
+    def _proposal_referenced_names_from_payload(self, proposal: dict) -> list[str]:
+        referenced = set()
+        for key in ("wrestler_name", "winner_name", "loser_name", "opponent_name"):
+            if proposal.get(key):
+                referenced.add(str(proposal[key]).strip())
+        for key in ("wrestlers", "participants", "referenced_wrestlers", "participant_names"):
+            value = proposal.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict) and item.get("name"):
+                        referenced.add(str(item["name"]).strip())
+                    elif isinstance(item, str):
+                        referenced.add(item.strip())
+        for text_key in ("title", "summary", "rationale"):
+            text = str(proposal.get(text_key) or "")
+            for left, right in re.findall(r"([A-Z][A-Za-z0-9 .'-]{1,40})\s+vs\.?\s+([A-Z][A-Za-z0-9 .'-]{1,40})", text):
+                referenced.update({self._clean_referenced_name(left), self._clean_referenced_name(right)})
+        return sorted(name for name in referenced if name)
+
+    def _unknown_wrestler_names(self, proposal: dict) -> list[str]:
+        roster_rows = self.repo.fetch_all("SELECT name FROM wrestlers WHERE COALESCE(is_retired, 0) = 0")
+        roster = {row["name"] for row in roster_rows}
+        return sorted(name for name in self._proposal_referenced_names_from_payload(proposal) if name and name not in roster)
+
+    def _clean_referenced_name(self, name: str) -> str:
+        return re.sub(r"^(Book|Approve|Run|Feature|Build|Promo beat:|Heat-Up Payoff:)\s+", "", str(name).strip(), flags=re.IGNORECASE).strip()
 
     def _execute_rejected_world_change(self, approval_row: dict) -> None:
         """
@@ -442,9 +713,13 @@ class AIShowrunnerService:
             """
         )
         if not run:
+            llm_draft = self._latest_llm_only_booking_draft()
+            if llm_draft:
+                return llm_draft
             return {"available": False, "message": "No AI Showrunner draft has been generated yet."}
         self._decode_run(run)
         card = run.get("generated_card_json") or {}
+        self._append_approved_llm_segments_to_card(card, run["show_id"])
         draft = self._card_to_booking_draft(run, card)
         self._append_scheduled_crown_matches_to_draft(draft)
         self._append_scheduled_cash_in_matches_to_draft(draft)
@@ -2705,8 +2980,30 @@ class AIShowrunnerService:
             """,
             (source_type, source_id, category),
         )
+        incoming_refs = (((recommendation or {}).get("llm_proposal") or {}).get("referenced_wrestlers") or [])
         if existing:
-            return self._decode_queue(existing)
+            decoded = self._decode_queue(existing)
+            current_rec = decoded.get("recommendation_json") or {}
+            current_refs = (((current_rec or {}).get("llm_proposal") or {}).get("referenced_wrestlers") or [])
+            if incoming_refs and not current_refs:
+                return self._refresh_existing_queue_item(decoded["id"], title, summary, recommendation, priority)
+            return decoded
+        if incoming_refs and str(source_type).startswith("llm_"):
+            stale = self.repo.fetch_one(
+                """
+                SELECT * FROM booker_approval_queue
+                WHERE source_type LIKE 'llm_%' AND category = ? AND status = 'pending'
+                  AND deadline_year = ? AND deadline_week = ? AND deleted_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (category, year, week + 1),
+            )
+            if stale:
+                decoded_stale = self._decode_queue(stale)
+                stale_refs = ((((decoded_stale.get("recommendation_json") or {}).get("llm_proposal") or {}).get("referenced_wrestlers")) or [])
+                if not stale_refs:
+                    return self._refresh_existing_queue_item(decoded_stale["id"], title, summary, recommendation, priority)
         now = self.now()
         row_id = new_id("approval")
         self.conn.execute(
@@ -2721,6 +3018,19 @@ class AIShowrunnerService:
         )
         self.conn.commit()
         return self._decode_queue(self.repo.fetch_one("SELECT * FROM booker_approval_queue WHERE id = ?", (row_id,)))
+
+    def _refresh_existing_queue_item(self, item_id: str, title: str, summary: str, recommendation: dict, priority: str) -> dict:
+        now = self.now()
+        self.conn.execute(
+            """
+            UPDATE booker_approval_queue
+            SET title = ?, summary = ?, recommendation_json = ?, priority = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (title, summary, json.dumps(recommendation), priority, now, item_id),
+        )
+        self.conn.commit()
+        return self._decode_queue(self.repo.fetch_one("SELECT * FROM booker_approval_queue WHERE id = ?", (item_id,)))
 
     def _persist_show_plan(self, show: dict, card: dict, year: int, week: int) -> dict:
         total_runtime = 180 if show.get("is_ppv") else 120
@@ -2808,6 +3118,78 @@ class AIShowrunnerService:
                     })
                     seen.add(match_id)
                     next_position += 1
+
+    def _append_approved_llm_segments_to_card(self, card: dict, show_id: str | None) -> None:
+        if not show_id or not isinstance(card, dict):
+            return
+        rows = self.repo.fetch_all(
+            """
+            SELECT * FROM booking_segments
+            WHERE show_id = ? AND item_type = 'llm_approved' AND allocation_status = 'approved_llm' AND deleted_at IS NULL
+            ORDER BY card_position
+            """,
+            (show_id,),
+        )
+        existing_ids = {item.get("id") for item in card.get("segments", [])}
+        for row in rows:
+            segment = self._llm_booking_row_to_card_segment(row)
+            if segment and segment.get("id") not in existing_ids:
+                card.setdefault("segments", []).append(segment)
+                existing_ids.add(segment.get("id"))
+        card["segments"] = sorted(card.get("segments", []), key=lambda item: int(item.get("position") or 999))
+
+    def _latest_llm_only_booking_draft(self) -> dict | None:
+        plan = self.repo.fetch_one(
+            """
+            SELECT bsp.* FROM booking_show_plans bsp
+            JOIN booking_segments bs ON bs.show_id = bsp.show_id
+            WHERE bs.item_type = 'llm_approved' AND bs.allocation_status = 'approved_llm' AND bs.deleted_at IS NULL
+            ORDER BY bs.created_at DESC
+            LIMIT 1
+            """
+        )
+        if not plan:
+            return None
+        card = {
+            "show_id": plan["show_id"],
+            "show_name": plan["show_name"],
+            "brand": plan["brand"],
+            "show_type": plan["show_type"],
+            "creative_goal": "Approved LLM booking proposals",
+            "segments": [],
+        }
+        self._append_approved_llm_segments_to_card(card, plan["show_id"])
+        run = {"id": "llm_approved_only", "show_id": plan["show_id"], "show_name": plan["show_name"], "brand": plan["brand"], "year": plan["year"], "week": plan["week"]}
+        return {"available": True, "run": run, "show_draft": self._card_to_booking_draft(run, card), "source": "approved_llm"}
+
+    def _llm_booking_row_to_card_segment(self, row: dict) -> dict | None:
+        try:
+            payload = self.repo.from_json(row.get("payload_json"), {})
+        except Exception:
+            payload = {}
+        proposal = payload.get("proposal") or {}
+        names = self._proposal_referenced_names_from_payload(proposal)
+        participants = []
+        if names:
+            placeholders = ",".join("?" for _ in names)
+            roster_rows = self.repo.fetch_all(f"SELECT id, name, role, gender, primary_brand FROM wrestlers WHERE name IN ({placeholders})", tuple(names))
+            by_name = {r["name"]: r for r in roster_rows}
+            for name in names:
+                if name in by_name:
+                    r = by_name[name]
+                    participants.append({"id": r["id"], "name": r["name"], "role": r.get("role"), "gender": r.get("gender"), "brand": r.get("primary_brand")})
+        proposal_type = str(proposal.get("proposal_type") or row.get("segment_type") or "promo").lower()
+        segment_type = "match" if proposal_type in {"match", "feud_payoff"} else "promo" if proposal_type in {"promo", "promo_beat"} else proposal_type
+        return {
+            "id": row["id"],
+            "segment_type": segment_type,
+            "position": row.get("card_position"),
+            "duration": row.get("planned_duration_minutes") or 6,
+            "description": proposal.get("summary") or proposal.get("title") or "Approved LLM booking proposal",
+            "participants": participants,
+            "winner": None,
+            "mechanical_effects": ["Approved from My Inbox", "Grounded against live roster"],
+        }
 
     def _card_to_booking_draft(self, run: dict, card: dict) -> dict:
         matches = []
