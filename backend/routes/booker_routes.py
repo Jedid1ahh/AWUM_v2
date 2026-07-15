@@ -6,6 +6,7 @@ from datetime import datetime
 from flask import Blueprint, current_app, jsonify, request
 from services.ai_showrunner_service import AIShowrunnerService
 from services.post_show_fallout_service import PostShowFalloutService
+from services.llm_provider import LLMProvider, LLMProposalService
 
 booker_bp = Blueprint('booker', __name__)
 
@@ -37,6 +38,13 @@ def get_post_show_fallout():
         current_app.config['POST_SHOW_FALLOUT_SERVICE'] = service
     return service
 
+
+def get_llm_proposal_service():
+    service = current_app.config.get('LLM_PROPOSAL_SERVICE')
+    if service is None:
+        service = LLMProposalService(get_showrunner(), LLMProvider())
+        current_app.config['LLM_PROPOSAL_SERVICE'] = service
+    return service
 
 def _now_iso() -> str:
     return datetime.utcnow().isoformat(timespec='seconds') + 'Z'
@@ -107,7 +115,6 @@ def _row_to_suggestion(row):
     d['context'] = json.loads(d.pop('context_json'))
     return d
 
-
 @booker_bp.route('/api/booker/profile', methods=['GET', 'PUT'])
 def booker_profile():
     db = get_database()
@@ -137,7 +144,6 @@ def booker_profile():
         row = c.execute('SELECT * FROM creative_assistant_profile WHERE id = 1').fetchone()
     return jsonify(dict(row))
 
-
 @booker_bp.route('/api/booker/suggestions', methods=['GET', 'POST'])
 def suggestions():
     db = get_database()
@@ -153,6 +159,8 @@ def suggestions():
 
         sid = f"sg_{uuid.uuid4().hex[:12]}"
         now = _now_iso()
+        headline = p.get('headline', 'New suggestion')
+        rationale = p.get('rationale', '')
         c.execute('''
             INSERT INTO booker_suggestions (
                 suggestion_id, category, priority, headline, rationale, options_json,
@@ -163,8 +171,8 @@ def suggestions():
             sid,
             p.get('category', 'creative-spark'),
             priority,
-            p.get('headline', 'New suggestion'),
-            p.get('rationale', ''),
+            headline,
+            rationale,
             json.dumps(p.get('options', [])),
             json.dumps(p.get('projections', {})),
             json.dumps(p.get('context', {})),
@@ -175,8 +183,30 @@ def suggestions():
             now,
         ))
         db.conn.commit()
+        state = db.get_game_state() if hasattr(db, 'get_game_state') else {}
+        year, week = _request_year_week(p, state)
+        approval = get_showrunner().queue_external_item(
+            year=year,
+            week=week,
+            source_type='booker_suggestion',
+            source_id=sid,
+            category=str(p.get('category', 'creative-spark')).lower().replace(' ', '_'),
+            priority=priority,
+            title=headline,
+            summary=rationale or 'Creative assistant suggestion awaiting review.',
+            recommendation={
+                'legacy_suggestion_id': sid,
+                'options': p.get('options', []),
+                'projections': p.get('projections', {}),
+                'context': p.get('context', {}),
+            },
+            policy='ask',
+            auto_week=None,
+        )
         row = c.execute('SELECT * FROM booker_suggestions WHERE suggestion_id = ?', (sid,)).fetchone()
-        return jsonify(_row_to_suggestion(row)), 201
+        response = _row_to_suggestion(row)
+        response['approval'] = approval
+        return jsonify(response), 201
 
     status = request.args.get('status')
     query = 'SELECT * FROM booker_suggestions'
@@ -187,7 +217,6 @@ def suggestions():
     query += ' ORDER BY created_at DESC'
     rows = c.execute(query, params).fetchall()
     return jsonify({'total': len(rows), 'suggestions': [_row_to_suggestion(r) for r in rows]})
-
 
 @booker_bp.route('/api/booker/suggestions/<suggestion_id>/respond', methods=['POST'])
 def respond_suggestion(suggestion_id):
@@ -217,7 +246,6 @@ def respond_suggestion(suggestion_id):
     db.conn.commit()
     return jsonify({'success': True, 'status': new_status})
 
-
 @booker_bp.route('/api/booker/notebook', methods=['GET'])
 def notebook():
     db = get_database()
@@ -227,6 +255,46 @@ def notebook():
     return jsonify({'total': len(rows), 'entries': [dict(r) for r in rows]})
 
 
+
+@booker_bp.route('/api/booker/inbox', methods=['GET'])
+def booker_inbox():
+    try:
+        status = request.args.get('status', 'pending')
+        if status in ('all', '*'):
+            status = None
+        limit = _coerce_int(request.args.get('limit'), 100)
+        category = request.args.get('category')
+        return jsonify(get_showrunner().inbox(status=status, limit=limit, category=category))
+    except Exception as exc:
+        current_app.logger.exception("Booker inbox failed")
+        return jsonify({'error': str(exc)}), 500
+
+@booker_bp.route('/api/booker/llm/status', methods=['GET'])
+def llm_status():
+    try:
+        return jsonify(get_llm_proposal_service().provider_status())
+    except Exception as exc:
+        current_app.logger.exception("LLM status failed")
+        return jsonify({'error': str(exc)}), 500
+
+@booker_bp.route('/api/booker/llm/proposals', methods=['POST'])
+def create_llm_proposal():
+    try:
+        data = request.get_json(silent=True) or {}
+        prompt = str(data.get('prompt') or data.get('message') or '').strip()
+        if not prompt:
+            return jsonify({'error': 'prompt is required'}), 422
+        state = get_database().get_game_state() if hasattr(get_database(), 'get_game_state') else {}
+        year, week = _request_year_week(data, state)
+        context = data.get('context') or {}
+        if not isinstance(context, dict):
+            return jsonify({'error': 'context must be an object'}), 422
+        result = get_llm_proposal_service().create_pitch(prompt, context=context, year=year, week=week)
+        return jsonify(result), 201
+    except Exception as exc:
+        current_app.logger.exception("LLM proposal failed")
+        return jsonify({'error': str(exc)}), 500
+
 @booker_bp.route('/api/booker/showrunner/dashboard', methods=['GET'])
 def showrunner_dashboard():
     try:
@@ -234,7 +302,6 @@ def showrunner_dashboard():
     except Exception as exc:
         current_app.logger.exception("Showrunner dashboard failed")
         return jsonify({'error': str(exc)}), 500
-
 
 @booker_bp.route('/api/booker/showrunner/weekly', methods=['POST'])
 def run_showrunner_weekly():
@@ -257,7 +324,6 @@ def run_showrunner_weekly():
         current_app.logger.exception("Showrunner weekly run failed")
         return jsonify({'error': str(exc)}), 500
 
-
 @booker_bp.route('/api/booker/showrunner/latest-booking-draft', methods=['GET'])
 def latest_showrunner_booking_draft():
     try:
@@ -265,7 +331,6 @@ def latest_showrunner_booking_draft():
     except Exception as exc:
         current_app.logger.exception("Showrunner latest booking draft failed")
         return jsonify({'error': str(exc)}), 500
-
 
 @booker_bp.route('/api/booker/showrunner/mitb/card', methods=['GET'])
 def fortunes_ladder_card():
@@ -281,7 +346,6 @@ def fortunes_ladder_card():
     except Exception as exc:
         current_app.logger.exception("Fortune's Ladder card build failed")
         return jsonify({'error': str(exc)}), 500
-
 
 @booker_bp.route('/api/booker/showrunner/mitb/card/replace', methods=['POST'])
 def replace_mitb_card_participant():
@@ -306,7 +370,6 @@ def replace_mitb_card_participant():
         current_app.logger.exception("MITB card participant replace failed")
         return jsonify({'error': str(exc)}), 500
 
-
 @booker_bp.route('/api/booker/showrunner/mitb/card/confirm', methods=['POST'])
 def confirm_mitb_card():
     """Lock in both divisions' MITB ladder fields."""
@@ -318,7 +381,6 @@ def confirm_mitb_card():
     except Exception as exc:
         current_app.logger.exception("MITB card confirm failed")
         return jsonify({'error': str(exc)}), 500
-
 
 @booker_bp.route('/api/booker/showrunner/mitb/resolve', methods=['POST'])
 def resolve_mitb_ladder_match():
@@ -343,7 +405,6 @@ def resolve_mitb_ladder_match():
         current_app.logger.exception("MITB winner resolution failed")
         return jsonify({'error': str(exc)}), 500
 
-
 @booker_bp.route('/api/booker/showrunner/mitb/briefcases', methods=['GET'])
 def list_mitb_briefcases():
     try:
@@ -353,7 +414,6 @@ def list_mitb_briefcases():
     except Exception as exc:
         current_app.logger.exception("MITB briefcase listing failed")
         return jsonify({'error': str(exc)}), 500
-
 
 @booker_bp.route('/api/booker/showrunner/mitb/cash-in/schedule', methods=['POST'])
 def schedule_mitb_cash_in():
@@ -389,7 +449,6 @@ def schedule_mitb_cash_in():
     except Exception as exc:
         current_app.logger.exception("MITB cash-in scheduling failed")
         return jsonify({'error': str(exc)}), 500
-
 
 @booker_bp.route('/api/booker/showrunner/mitb/cash-in', methods=['POST'])
 def cash_in_mitb_briefcase():
@@ -452,7 +511,6 @@ def cash_in_mitb_briefcase():
         current_app.logger.exception("MITB cash-in failed")
         return jsonify({'error': str(exc)}), 500
 
-
 @booker_bp.route('/api/booker/showrunner/war-games/plan', methods=['GET'])
 def war_games_plan():
     """Get (or build) the current WarGames faction plan for the target event."""
@@ -466,7 +524,6 @@ def war_games_plan():
     except Exception as exc:
         current_app.logger.exception("WarGames plan build failed")
         return jsonify({'error': str(exc)}), 500
-
 
 @booker_bp.route('/api/booker/showrunner/war-games/simulate', methods=['POST'])
 def simulate_war_games():
@@ -502,7 +559,6 @@ def simulate_war_games():
         current_app.logger.exception("WarGames simulation failed")
         return jsonify({'error': str(exc)}), 500
 
-
 @booker_bp.route('/api/booker/showrunner/war-games/list', methods=['GET'])
 def list_war_games_plans():
     try:
@@ -511,7 +567,6 @@ def list_war_games_plans():
     except Exception as exc:
         current_app.logger.exception("WarGames plan listing failed")
         return jsonify({'error': str(exc)}), 500
-
 
 @booker_bp.route('/api/booker/showrunner/crown-tournament/build', methods=['POST'])
 def build_crown_tournament():
@@ -537,7 +592,6 @@ def build_crown_tournament():
         current_app.logger.exception("Crown tournament build failed")
         return jsonify({'error': str(exc)}), 500
 
-
 @booker_bp.route('/api/booker/showrunner/crown-tournament/resolve', methods=['POST'])
 def resolve_crown_tournament_match():
     """Record a QF/SF/Final result and auto-advance the bracket."""
@@ -561,7 +615,6 @@ def resolve_crown_tournament_match():
         current_app.logger.exception("Crown tournament match resolution failed")
         return jsonify({'error': str(exc)}), 500
 
-
 @booker_bp.route('/api/booker/showrunner/crown-tournament/list', methods=['GET'])
 def list_crown_tournaments():
     try:
@@ -570,7 +623,6 @@ def list_crown_tournaments():
     except Exception as exc:
         current_app.logger.exception("Crown tournament listing failed")
         return jsonify({'error': str(exc)}), 500
-
 
 @booker_bp.route('/api/booker/showrunner/dark-house-week', methods=['POST'])
 def run_dark_house_week():
@@ -592,7 +644,6 @@ def run_dark_house_week():
         current_app.logger.exception("Dark/house autopilot failed")
         return jsonify({'error': str(exc)}), 500
 
-
 @booker_bp.route('/api/booker/showrunner/promo-beats', methods=['POST'])
 def generate_promo_beats():
     try:
@@ -612,7 +663,6 @@ def generate_promo_beats():
         current_app.logger.exception("Promo beat generation failed")
         return jsonify({'error': str(exc)}), 500
 
-
 @booker_bp.route('/api/booker/showrunner/live-interruption', methods=['POST'])
 def preview_live_interruption():
     try:
@@ -628,7 +678,6 @@ def preview_live_interruption():
         current_app.logger.exception("Live interruption preview failed")
         return jsonify({'error': str(exc)}), 500
 
-
 @booker_bp.route('/api/booker/approval-queue/<approval_id>/decision', methods=['POST'])
 def decide_booker_approval(approval_id):
     try:
@@ -638,7 +687,6 @@ def decide_booker_approval(approval_id):
     except Exception as exc:
         current_app.logger.exception("Booker approval decision failed")
         return jsonify({'error': str(exc)}), 500
-
 
 @booker_bp.route('/api/booker/approval-queue/auto-resolve', methods=['POST'])
 def auto_resolve_booker_queue():
@@ -650,7 +698,6 @@ def auto_resolve_booker_queue():
     except Exception as exc:
         current_app.logger.exception("Booker queue auto-resolve failed")
         return jsonify({'error': str(exc)}), 500
-
 
 @booker_bp.route('/api/booker/post-show/fallout/latest', methods=['GET'])
 def latest_post_show_fallout():
@@ -669,7 +716,6 @@ def latest_post_show_fallout():
         current_app.logger.exception("Post-show fallout latest failed")
         return jsonify({'error': str(exc)}), 500
 
-
 @booker_bp.route('/api/booker/post-show/fallout/items/<item_id>/decision', methods=['POST'])
 def decide_post_show_fallout_item(item_id):
     try:
@@ -679,7 +725,6 @@ def decide_post_show_fallout_item(item_id):
     except Exception as exc:
         current_app.logger.exception("Post-show fallout decision failed")
         return jsonify({'error': str(exc)}), 500
-
 
 @booker_bp.route('/api/booker/post-show/fallout/<report_id>/auto-handle', methods=['POST'])
 def auto_handle_post_show_fallout(report_id):

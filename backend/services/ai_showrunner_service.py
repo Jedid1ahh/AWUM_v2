@@ -73,6 +73,71 @@ class AIShowrunnerService:
             "last_run": last_run,
         }
 
+
+    def queue_external_item(
+        self,
+        year: int,
+        week: int,
+        source_type: str,
+        source_id: str,
+        category: str,
+        priority: str,
+        title: str,
+        summary: str,
+        recommendation: dict,
+        policy: str = "ask",
+        auto_week: int | None = None,
+    ) -> dict:
+        """Public, canonical enqueue method for LLM and cross-system proposals."""
+        self._ensure_tables()
+        return self._queue_item(
+            year,
+            week,
+            source_type,
+            source_id,
+            category,
+            priority,
+            title,
+            summary,
+            recommendation,
+            policy,
+            auto_week,
+        )
+
+    def inbox(self, status: str | None = "pending", limit: int = 100, category: str | None = None) -> dict:
+        """Return approval queue rows for the dedicated My Inbox page/API."""
+        self._ensure_tables()
+        if category:
+            if status:
+                rows = self.repo.fetch_all(
+                    """
+                    SELECT * FROM booker_approval_queue
+                    WHERE status = ? AND category = ? AND deleted_at IS NULL
+                    ORDER BY CASE priority
+                        WHEN 'critical' THEN 0 WHEN 'urgent' THEN 1 WHEN 'high' THEN 2
+                        WHEN 'opportunity' THEN 3 WHEN 'medium' THEN 4 ELSE 5 END, created_at DESC
+                    LIMIT ?
+                    """,
+                    (status, category, int(limit)),
+                )
+            else:
+                rows = self.repo.fetch_all(
+                    """
+                    SELECT * FROM booker_approval_queue
+                    WHERE category = ? AND deleted_at IS NULL
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (category, int(limit)),
+                )
+        else:
+            rows = self._queue_rows(status, int(limit))
+        items = [self._decode_queue(row) for row in rows]
+        counts = {}
+        for item in items:
+            counts[item.get("category") or "uncategorized"] = counts.get(item.get("category") or "uncategorized", 0) + 1
+        return {"total": len(items), "items": items, "counts_by_category": counts}
+
     def run_weekly(self, year: int, week: int, universe=None, seed: int | None = None, force: bool = False, autonomy_level: str = "balanced") -> dict:
         self._ensure_tables()
         show = self._current_show(universe, year, week)
