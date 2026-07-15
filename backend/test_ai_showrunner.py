@@ -192,6 +192,326 @@ class AIShowrunnerTests(unittest.TestCase):
         dark = self.service.run_dark_house_autopilot(1, 11, seed=9, force=True)
         self.assertGreaterEqual(dark["total"], 2)
 
+    def test_google_ai_studio_is_primary_when_both_provider_keys_exist(self):
+        from unittest.mock import patch
+        from services.llm_provider import LLMProvider
+
+        with patch.dict(os.environ, {"GOOGLE_AI_API_KEY": "google-key", "OPENROUTER_API_KEY": "openrouter-key"}, clear=True):
+            provider = LLMProvider()
+
+        status = provider.status()
+        self.assertEqual(status["primary"], "google")
+        self.assertEqual(status["primary_label"], "Google AI Studio")
+        self.assertIn("openrouter", status["fallback_chain"])
+
+    def test_openrouter_uses_project_default_model_fallback_order(self):
+        from unittest.mock import patch
+        from services.llm_provider import DEFAULT_OPENROUTER_MODELS, LLMProvider
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            provider = LLMProvider()
+
+        self.assertEqual(provider.openrouter_models, DEFAULT_OPENROUTER_MODELS)
+        self.assertEqual(provider.status()["openrouter_models"], DEFAULT_OPENROUTER_MODELS)
+
+    def test_openrouter_model_env_prepends_custom_model_without_losing_defaults(self):
+        from unittest.mock import patch
+        from services.llm_provider import DEFAULT_OPENROUTER_MODELS, LLMProvider
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key", "AWUM_OPENROUTER_MODEL": "custom/model:free"}, clear=True):
+            provider = LLMProvider()
+
+        self.assertEqual(provider.openrouter_models[0], "custom/model:free")
+        self.assertEqual(provider.openrouter_models[1:], DEFAULT_OPENROUTER_MODELS)
+
+    def test_llm_pitch_rejects_unknown_wrestler_names_and_uses_roster_fallback(self):
+        from services.llm_provider import LLMProposalService
+
+        class HallucinatingProvider:
+            def status(self):
+                return {"primary": "test"}
+
+            def complete_json(self, system_prompt, user_prompt, schema_hint=None):
+                from services.llm_provider import LLMResult
+                return LLMResult(
+                    provider="test",
+                    model="hallucination",
+                    content="{}",
+                    parsed={
+                        "title": "Heat-Up Payoff: The Rumble vs. The Viper",
+                        "summary": "Deliver an explosive payoff to the long-running feud between The Rumble and The Viper.",
+                        "category": "feud",
+                        "priority": "high",
+                        "proposal_type": "feud_payoff",
+                        "referenced_wrestlers": ["The Rumble", "The Viper"],
+                    },
+                )
+
+        service = LLMProposalService(self.service, HallucinatingProvider())
+        result = service.create_pitch(
+            "Suggest a feud payoff.",
+            context={"category": "feud", "proposal_type": "feud_payoff"},
+            year=1,
+            week=14,
+        )
+
+        approval = result["approval"]
+        self.assertEqual(result["provider"]["provider"], "local_fallback")
+        self.assertNotIn("The Rumble", approval["title"])
+        self.assertNotIn("The Viper", approval["summary"])
+        self.assertIn("Alpha Ace", approval["summary"])
+
+    def test_external_llm_pitch_uses_approval_queue(self):
+        from services.llm_provider import LLMProvider, LLMProposalService
+
+        provider = LLMProvider()
+        provider.google_key = None
+        provider.openrouter_key = None
+        service = LLMProposalService(self.service, provider)
+        result = service.create_pitch(
+            "Suggest a protected promo for Alpha Ace.",
+            context={"category": "promo", "priority": "opportunity"},
+            year=1,
+            week=12,
+        )
+        approval = result["approval"]
+        self.assertEqual(approval["status"], "pending")
+        self.assertEqual(approval["source_type"], "llm_pitch")
+        inbox = self.service.inbox(status="pending", category="promo")
+        self.assertGreaterEqual(inbox["total"], 1)
+
+    def test_approved_llm_match_materializes_booking_segment(self):
+        approval = self.service.queue_external_item(
+            1,
+            15,
+            "llm_pitch",
+            "test_pitch",
+            "match",
+            "high",
+            "Book Alpha Ace vs Beta Brawler",
+            "Approved match using real roster members only.",
+            {
+                "llm_proposal": {
+                    "title": "Book Alpha Ace vs Beta Brawler",
+                    "summary": "Alpha Ace faces Beta Brawler in a featured match.",
+                    "proposal_type": "match",
+                    "referenced_wrestlers": ["Alpha Ace", "Beta Brawler"],
+                }
+            },
+            "ask",
+        )
+
+        decided = self.service.decide_approval(approval["id"], {"decision": "approve"})
+        self.assertEqual(decided["status"], "approved")
+
+        segment = self.database.conn.execute(
+            "SELECT * FROM booking_segments WHERE source_item_id = ? AND item_type = 'llm_approved'",
+            (approval["id"],),
+        ).fetchone()
+        self.assertIsNotNone(segment)
+        self.assertEqual(segment["allocation_status"], "approved_llm")
+
+    def test_approved_llm_proposal_with_unknown_wrestler_is_blocked(self):
+        approval = self.service.queue_external_item(
+            1,
+            15,
+            "llm_pitch",
+            "bad_pitch",
+            "match",
+            "high",
+            "Book The Rumble vs The Viper",
+            "Fake names should never execute.",
+            {
+                "llm_proposal": {
+                    "title": "Book The Rumble vs The Viper",
+                    "summary": "The Rumble faces The Viper.",
+                    "proposal_type": "match",
+                    "referenced_wrestlers": ["The Rumble", "The Viper"],
+                }
+            },
+            "ask",
+        )
+
+        self.service.decide_approval(approval["id"], {"decision": "approve"})
+        execution = self.database.conn.execute(
+            "SELECT * FROM llm_proposal_executions WHERE approval_id = ?",
+            (approval["id"],),
+        ).fetchone()
+        self.assertEqual(execution["status"], "blocked")
+        segment = self.database.conn.execute(
+            "SELECT * FROM booking_segments WHERE source_item_id = ?",
+            (approval["id"],),
+        ).fetchone()
+        self.assertIsNone(segment)
+
+    def test_talent_chat_tracks_push_promise_for_selected_wrestler(self):
+        from services.talent_chat_service import TalentChatService
+
+        class WrongNameProvider:
+            def complete_json(self, system_prompt, user_prompt, schema_hint=None):
+                from services.llm_provider import LLMResult
+                return LLMResult(
+                    provider="test",
+                    model="wrong-name",
+                    content="{}",
+                    parsed={"wrestler_name": "The Rumble", "reply": "I am not real.", "morale": 99, "stage": "ecstatic"},
+                )
+
+        chat = TalentChatService(self.database, WrongNameProvider())
+        result = chat.chat("w_alpha", "I promise I will push you in 2 days.", 1, 16)
+
+        self.assertEqual(result["wrestler_name"], "Alpha Ace")
+        self.assertTrue(result["promise_created"])
+        self.assertEqual(result["promise"]["deadline_weeks"], 1)
+        promise = self.database.conn.execute(
+            "SELECT * FROM contract_promises WHERE wrestler_id = ?",
+            ("w_alpha",),
+        ).fetchone()
+        self.assertIsNotNone(promise)
+        self.assertEqual(promise["promise_type"], "push")
+
+    def test_llm_pitch_respects_requested_brand_and_gender_constraints(self):
+        from services.llm_provider import LLMProposalService
+
+        now = "2026-06-30T00:00:00"
+        extra = [
+            ("w_alpha_m1", "Alpha King", 32, "Male", "face", "main_event", "ROC Alpha", 80, 75, 70, 82, 78, 72, 10, 1, 91, 20, 72, 5, "None", None, 0, 200000, 80, 40, 1, 1, 0),
+            ("w_alpha_m2", "Alpha Duke", 30, "Male", "heel", "upper_midcard", "ROC Alpha", 78, 72, 74, 77, 75, 70, 8, 0, 88, 18, 70, 5, "None", None, 0, 180000, 80, 40, 1, 1, 0),
+            ("w_vel_m1", "Velocity Rogue", 33, "Male", "heel", "main_event", "Velocity", 81, 73, 76, 83, 77, 71, 11, 1, 93, 22, 74, 4, "None", None, 0, 210000, 80, 40, 1, 1, 0),
+        ]
+        self.database.conn.executemany(
+            """
+            INSERT OR REPLACE INTO wrestlers (
+                id, name, age, gender, alignment, role, primary_brand,
+                brawling, technical, speed, mic, psychology, stamina,
+                years_experience, is_major_superstar, popularity, momentum,
+                morale, fatigue, injury_severity, injury_description,
+                injury_weeks_remaining, contract_salary, contract_total_weeks,
+                contract_weeks_remaining, contract_signing_year,
+                contract_signing_week, is_retired, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [row + (now, now) for row in extra],
+        )
+        self.database.conn.commit()
+
+        class WrongBrandProvider:
+            def complete_json(self, system_prompt, user_prompt, schema_hint=None):
+                from services.llm_provider import LLMResult
+                return LLMResult(
+                    provider="test",
+                    model="wrong-brand",
+                    content="{}",
+                    parsed={
+                        "title": "Velocity Rogue vs Alpha King promo",
+                        "summary": "Velocity Rogue confronts Alpha King on Alpha.",
+                        "category": "promo",
+                        "proposal_type": "promo",
+                        "referenced_wrestlers": ["Velocity Rogue", "Alpha King"],
+                    },
+                )
+
+        service = LLMProposalService(self.service, WrongBrandProvider())
+        result = service.create_pitch(
+            "Suggest a promo beat between two top male stars on the Alpha brand for next ROC Alpha weekly show.",
+            context={},
+            year=1,
+            week=17,
+        )
+
+        self.assertEqual(result["provider"]["provider"], "local_fallback")
+        self.assertIn("Alpha King", result["approval"]["summary"])
+        self.assertIn("Alpha Duke", result["approval"]["summary"])
+        self.assertNotIn("Velocity Rogue", result["approval"]["summary"])
+
+    def test_repeated_llm_pitch_repairs_existing_empty_recommendation(self):
+        empty = self.service.queue_external_item(
+            1,
+            14,
+            "llm_pitch",
+            "llm_pitch:Grounded pitch: Alpha Ace vs Beta Brawler:1:14",
+            "booking",
+            "opportunity",
+            "Grounded pitch: Alpha Ace vs Beta Brawler",
+            "Old empty pitch.",
+            {},
+            "ask",
+        )
+
+        from services.llm_provider import LLMProvider, LLMProposalService
+
+        provider = LLMProvider()
+        provider.google_key = None
+        provider.openrouter_key = None
+        service = LLMProposalService(self.service, provider)
+        result = service.create_pitch(
+            "Suggest a promo beat between two top male stars.",
+            context={"category": "booking"},
+            year=1,
+            week=14,
+        )
+
+        self.assertEqual(result["approval"]["id"], empty["id"])
+        recommendation = result["approval"]["recommendation_json"]
+        self.assertIn("llm_proposal", recommendation)
+        self.assertTrue(recommendation["llm_proposal"].get("referenced_wrestlers"))
+
+    def test_approved_llm_intergender_match_is_blocked(self):
+        approval = self.service.queue_external_item(
+            1,
+            18,
+            "llm_pitch",
+            "intergender_pitch",
+            "match",
+            "high",
+            "Book Alpha Ace vs Gamma Prospect",
+            "AI should not book intergender matches.",
+            {
+                "llm_proposal": {
+                    "title": "Book Alpha Ace vs Gamma Prospect",
+                    "summary": "Alpha Ace faces Gamma Prospect.",
+                    "proposal_type": "match",
+                    "referenced_wrestlers": ["Alpha Ace", "Gamma Prospect"],
+                }
+            },
+            "ask",
+        )
+
+        self.service.decide_approval(approval["id"], {"decision": "approve"})
+        execution = self.database.conn.execute(
+            "SELECT * FROM llm_proposal_executions WHERE approval_id = ?",
+            (approval["id"],),
+        ).fetchone()
+        self.assertEqual(execution["status"], "blocked")
+        self.assertIn("intergender", execution["result_json"])
+
+    def test_approved_llm_segment_appears_in_latest_booking_draft(self):
+        self.service.run_weekly(1, 19, seed=88, force=True, autonomy_level="balanced")
+        approval = self.service.queue_external_item(
+            1,
+            19,
+            "llm_pitch",
+            "promo_pitch",
+            "promo",
+            "high",
+            "Promo beat: Alpha Ace and Beta Brawler",
+            "A grounded promo beat for the latest AI card.",
+            {
+                "llm_proposal": {
+                    "title": "Promo beat: Alpha Ace and Beta Brawler",
+                    "summary": "Alpha Ace and Beta Brawler trade promo beats before the main event.",
+                    "proposal_type": "promo",
+                    "referenced_wrestlers": ["Alpha Ace", "Beta Brawler"],
+                }
+            },
+            "ask",
+        )
+        self.service.decide_approval(approval["id"], {"decision": "approve"})
+
+        draft = self.service.latest_booking_draft()
+        segment_names = [segment.get("display_name") or segment.get("description") for segment in draft["show_draft"].get("segments", [])]
+        self.assertTrue(any("Alpha Ace and Beta Brawler" in str(name) for name in segment_names))
+
 
 if __name__ == "__main__":
     unittest.main()
