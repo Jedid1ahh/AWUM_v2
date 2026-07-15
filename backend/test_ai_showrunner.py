@@ -375,8 +375,8 @@ class AIShowrunnerTests(unittest.TestCase):
 
         now = "2026-06-30T00:00:00"
         extra = [
-            ("w_alpha_m1", "Alpha King", 32, "Male", "face", "main_event", "Alpha", 80, 75, 70, 82, 78, 72, 10, 1, 91, 20, 72, 5, "None", None, 0, 200000, 80, 40, 1, 1, 0),
-            ("w_alpha_m2", "Alpha Duke", 30, "Male", "heel", "upper_midcard", "Alpha", 78, 72, 74, 77, 75, 70, 8, 0, 88, 18, 70, 5, "None", None, 0, 180000, 80, 40, 1, 1, 0),
+            ("w_alpha_m1", "Alpha King", 32, "Male", "face", "main_event", "ROC Alpha", 80, 75, 70, 82, 78, 72, 10, 1, 91, 20, 72, 5, "None", None, 0, 200000, 80, 40, 1, 1, 0),
+            ("w_alpha_m2", "Alpha Duke", 30, "Male", "heel", "upper_midcard", "ROC Alpha", 78, 72, 74, 77, 75, 70, 8, 0, 88, 18, 70, 5, "None", None, 0, 180000, 80, 40, 1, 1, 0),
             ("w_vel_m1", "Velocity Rogue", 33, "Male", "heel", "main_event", "Velocity", 81, 73, 76, 83, 77, 71, 11, 1, 93, 22, 74, 4, "None", None, 0, 210000, 80, 40, 1, 1, 0),
         ]
         self.database.conn.executemany(
@@ -423,6 +423,38 @@ class AIShowrunnerTests(unittest.TestCase):
         self.assertIn("Alpha King", result["approval"]["summary"])
         self.assertIn("Alpha Duke", result["approval"]["summary"])
         self.assertNotIn("Velocity Rogue", result["approval"]["summary"])
+
+    def test_repeated_llm_pitch_repairs_existing_empty_recommendation(self):
+        empty = self.service.queue_external_item(
+            1,
+            14,
+            "llm_pitch",
+            "llm_pitch:Grounded pitch: Alpha Ace vs Beta Brawler:1:14",
+            "booking",
+            "opportunity",
+            "Grounded pitch: Alpha Ace vs Beta Brawler",
+            "Old empty pitch.",
+            {},
+            "ask",
+        )
+
+        from services.llm_provider import LLMProvider, LLMProposalService
+
+        provider = LLMProvider()
+        provider.google_key = None
+        provider.openrouter_key = None
+        service = LLMProposalService(self.service, provider)
+        result = service.create_pitch(
+            "Suggest a promo beat between two top male stars.",
+            context={"category": "booking"},
+            year=1,
+            week=14,
+        )
+
+        self.assertEqual(result["approval"]["id"], empty["id"])
+        recommendation = result["approval"]["recommendation_json"]
+        self.assertIn("llm_proposal", recommendation)
+        self.assertTrue(recommendation["llm_proposal"].get("referenced_wrestlers"))
 
     def test_approved_llm_intergender_match_is_blocked(self):
         approval = self.service.queue_external_item(

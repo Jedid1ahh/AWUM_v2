@@ -440,7 +440,7 @@ class AIShowrunnerService:
         constraints = proposal.get("constraints") or {}
         brand = constraints.get("brand") or proposal.get("target_brand")
         if brand:
-            bad_brand = sorted(row["name"] for row in rows if str(row.get("primary_brand") or "").lower() != str(brand).lower())
+            bad_brand = sorted(row["name"] for row in rows if not self._brand_matches(row.get("primary_brand"), brand))
             if bad_brand:
                 return {"error": "wrong_brand", "requested_brand": brand, "wrestlers": bad_brand}
         gender = constraints.get("gender") or proposal.get("target_gender")
@@ -454,6 +454,20 @@ class AIShowrunnerService:
             if len(genders) > 1:
                 return {"error": "intergender_match_blocked", "message": "Showrunner AI may not book intergender matches."}
         return None
+
+    def _brand_matches(self, wrestler_brand: Any, requested_brand: Any) -> bool:
+        if not requested_brand:
+            return True
+        raw = str(wrestler_brand or "").lower()
+        requested = str(requested_brand or "").lower()
+        def normalize(value: str) -> str:
+            value = re.sub(r"\b(roc|brand|weekly|show)\b", " ", value)
+            return re.sub(r"[^a-z0-9]+", " ", value).strip()
+        raw_norm = normalize(raw)
+        requested_norm = normalize(requested)
+        if not raw_norm or not requested_norm:
+            return False
+        return raw_norm == requested_norm or requested_norm in raw_norm.split() or requested_norm in raw_norm or raw_norm in requested_norm
 
     def _proposal_referenced_names_from_payload(self, proposal: dict) -> list[str]:
         referenced = set()
@@ -2957,8 +2971,30 @@ class AIShowrunnerService:
             """,
             (source_type, source_id, category),
         )
+        incoming_refs = (((recommendation or {}).get("llm_proposal") or {}).get("referenced_wrestlers") or [])
         if existing:
-            return self._decode_queue(existing)
+            decoded = self._decode_queue(existing)
+            current_rec = decoded.get("recommendation_json") or {}
+            current_refs = (((current_rec or {}).get("llm_proposal") or {}).get("referenced_wrestlers") or [])
+            if incoming_refs and not current_refs:
+                return self._refresh_existing_queue_item(decoded["id"], title, summary, recommendation, priority)
+            return decoded
+        if incoming_refs and str(source_type).startswith("llm_"):
+            stale = self.repo.fetch_one(
+                """
+                SELECT * FROM booker_approval_queue
+                WHERE source_type LIKE 'llm_%' AND category = ? AND status = 'pending'
+                  AND deadline_year = ? AND deadline_week = ? AND deleted_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (category, year, week + 1),
+            )
+            if stale:
+                decoded_stale = self._decode_queue(stale)
+                stale_refs = ((((decoded_stale.get("recommendation_json") or {}).get("llm_proposal") or {}).get("referenced_wrestlers")) or [])
+                if not stale_refs:
+                    return self._refresh_existing_queue_item(decoded_stale["id"], title, summary, recommendation, priority)
         now = self.now()
         row_id = new_id("approval")
         self.conn.execute(
@@ -2973,6 +3009,19 @@ class AIShowrunnerService:
         )
         self.conn.commit()
         return self._decode_queue(self.repo.fetch_one("SELECT * FROM booker_approval_queue WHERE id = ?", (row_id,)))
+
+    def _refresh_existing_queue_item(self, item_id: str, title: str, summary: str, recommendation: dict, priority: str) -> dict:
+        now = self.now()
+        self.conn.execute(
+            """
+            UPDATE booker_approval_queue
+            SET title = ?, summary = ?, recommendation_json = ?, priority = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (title, summary, json.dumps(recommendation), priority, now, item_id),
+        )
+        self.conn.commit()
+        return self._decode_queue(self.repo.fetch_one("SELECT * FROM booker_approval_queue WHERE id = ?", (item_id,)))
 
     def _persist_show_plan(self, show: dict, card: dict, year: int, week: int) -> dict:
         total_runtime = 180 if show.get("is_ppv") else 120

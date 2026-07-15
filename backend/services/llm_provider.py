@@ -383,11 +383,25 @@ class LLMProposalService:
         filtered = list(roster)
         brand = constraints.get("brand")
         if brand:
-            filtered = [row for row in filtered if str(row.get("primary_brand") or "").lower() == str(brand).lower()]
+            filtered = [row for row in filtered if self._brand_matches(row.get("primary_brand"), brand)]
         gender = constraints.get("gender")
         if gender:
             filtered = [row for row in filtered if str(row.get("gender") or "").lower() == str(gender).lower()]
         return filtered
+
+    def _brand_matches(self, wrestler_brand: Any, requested_brand: Any) -> bool:
+        if not requested_brand:
+            return True
+        raw = str(wrestler_brand or "").lower()
+        requested = str(requested_brand or "").lower()
+        def normalize(value: str) -> str:
+            value = re.sub(r"\b(roc|brand|weekly|show)\b", " ", value)
+            return re.sub(r"[^a-z0-9]+", " ", value).strip()
+        raw_norm = normalize(raw)
+        requested_norm = normalize(requested)
+        if not raw_norm or not requested_norm:
+            return False
+        return raw_norm == requested_norm or requested_norm in raw_norm.split() or requested_norm in raw_norm or raw_norm in requested_norm
 
     def _validate_proposal_grounding(self, proposal: dict[str, Any], game_context: dict[str, Any], constraints: dict[str, Any] | None = None) -> None:
         constraints = constraints or {}
@@ -408,7 +422,7 @@ class LLMProposalService:
         requested_brand = constraints.get("brand")
         if requested_brand:
             for row in referenced_rows:
-                if str(row.get("primary_brand") or "").lower() != str(requested_brand).lower():
+                if not self._brand_matches(row.get("primary_brand"), requested_brand):
                     bad_brand.append(row.get("name"))
         if bad_brand:
             raise LLMProviderError(f"LLM proposal used wrestler(s) outside requested {requested_brand} brand: {', '.join(bad_brand)}")
