@@ -192,6 +192,27 @@ class AIShowrunnerTests(unittest.TestCase):
         dark = self.service.run_dark_house_autopilot(1, 11, seed=9, force=True)
         self.assertGreaterEqual(dark["total"], 2)
 
+    def test_openrouter_uses_project_default_model_fallback_order(self):
+        from unittest.mock import patch
+        from services.llm_provider import DEFAULT_OPENROUTER_MODELS, LLMProvider
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True):
+            provider = LLMProvider()
+
+        self.assertEqual(provider.openrouter_models, DEFAULT_OPENROUTER_MODELS)
+        self.assertEqual(provider.status()["openrouter_models"], DEFAULT_OPENROUTER_MODELS)
+
+    def test_openrouter_model_env_prepends_custom_model_without_losing_defaults(self):
+        from unittest.mock import patch
+        from services.llm_provider import DEFAULT_OPENROUTER_MODELS, LLMProvider
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key", "AWUM_OPENROUTER_MODEL": "custom/model:free"}, clear=True):
+            provider = LLMProvider()
+
+        self.assertEqual(provider.openrouter_models[0], "custom/model:free")
+        self.assertEqual(provider.openrouter_models[1:], DEFAULT_OPENROUTER_MODELS)
+
+
     def test_external_llm_pitch_uses_approval_queue(self):
         from services.llm_provider import LLMProvider, LLMProposalService
 

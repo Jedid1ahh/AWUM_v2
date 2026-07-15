@@ -5,12 +5,22 @@ import os
 import re
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
 class LLMProviderError(RuntimeError):
     """Raised when no configured LLM provider can return a usable response."""
+
+
+DEFAULT_OPENROUTER_MODELS = [
+    "openai/gpt-oss-20b:free",
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-nano-9b-v2:free",
+    "poolside/laguna-xs-2.1:free",
+    "cohere/north-mini-code:free",
+]
 
 
 @dataclass
@@ -20,6 +30,7 @@ class LLMResult:
     content: str
     parsed: dict[str, Any] | None = None
     fallback_used: bool = False
+    attempted_models: list[str] = field(default_factory=list)
 
 
 class LLMProvider:
@@ -34,7 +45,8 @@ class LLMProvider:
         self.google_key = os.environ.get("GOOGLE_AI_API_KEY") or os.environ.get("GEMINI_API_KEY")
         self.openrouter_key = os.environ.get("OPENROUTER_API_KEY")
         self.google_model = os.environ.get("AWUM_GOOGLE_MODEL") or os.environ.get("AWUM_LLM_MODEL") or "gemini-1.5-flash"
-        self.openrouter_model = os.environ.get("AWUM_OPENROUTER_MODEL") or "openai/gpt-4o-mini"
+        self.openrouter_models = self._openrouter_models_from_env()
+        self.openrouter_model = self.openrouter_models[0]
         self.timeout = float(os.environ.get("AWUM_LLM_TIMEOUT_SECONDS", "20"))
 
     def status(self) -> dict[str, Any]:
@@ -44,6 +56,7 @@ class LLMProvider:
             "primary": "google" if self.google_key else ("openrouter" if self.openrouter_key else "local_fallback"),
             "google_model": self.google_model,
             "openrouter_model": self.openrouter_model,
+            "openrouter_models": self.openrouter_models,
         }
 
     def complete_json(self, system_prompt: str, user_prompt: str, schema_hint: dict[str, Any] | None = None) -> LLMResult:
@@ -57,14 +70,31 @@ class LLMProvider:
             except Exception as exc:  # provider fallback boundary
                 errors.append(f"google: {exc}")
         if self.openrouter_key:
-            try:
-                result = self._call_openrouter(system_prompt, prompt)
-                result.parsed = self._parse_json_object(result.content)
-                result.fallback_used = bool(errors)
-                return result
-            except Exception as exc:
-                errors.append(f"openrouter: {exc}")
+            attempted_models: list[str] = []
+            for model in self.openrouter_models:
+                attempted_models.append(model)
+                try:
+                    result = self._call_openrouter(system_prompt, prompt, model)
+                    result.parsed = self._parse_json_object(result.content)
+                    result.fallback_used = bool(errors) or model != self.openrouter_models[0]
+                    result.attempted_models = attempted_models
+                    return result
+                except Exception as exc:
+                    errors.append(f"openrouter:{model}: {exc}")
         raise LLMProviderError("No LLM provider returned valid JSON. " + "; ".join(errors))
+
+    def _openrouter_models_from_env(self) -> list[str]:
+        configured = []
+        raw_list = os.environ.get("AWUM_OPENROUTER_MODELS", "")
+        configured.extend(model.strip() for model in raw_list.split(",") if model.strip())
+        single_model = os.environ.get("AWUM_OPENROUTER_MODEL")
+        if single_model:
+            configured.insert(0, single_model.strip())
+        models = []
+        for model in configured + DEFAULT_OPENROUTER_MODELS:
+            if model and model not in models:
+                models.append(model)
+        return models
 
     def _json_prompt(self, system_prompt: str, user_prompt: str, schema_hint: dict[str, Any] | None) -> str:
         schema = json.dumps(schema_hint or {}, indent=2, ensure_ascii=False)
@@ -92,14 +122,14 @@ class LLMProvider:
             raise LLMProviderError("empty Google response")
         return LLMResult(provider="google", model=self.google_model, content=content)
 
-    def _call_openrouter(self, system_prompt: str, prompt: str) -> LLMResult:
+    def _call_openrouter(self, system_prompt: str, prompt: str, model: str) -> LLMResult:
         headers = {
             "Authorization": f"Bearer {self.openrouter_key}",
             "HTTP-Referer": os.environ.get("AWUM_SITE_URL", "http://127.0.0.1:8080"),
             "X-Title": "AWUM",
         }
         payload = {
-            "model": self.openrouter_model,
+            "model": model,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -112,7 +142,7 @@ class LLMProvider:
         content = ((choices[0] or {}).get("message") or {}).get("content", "").strip() if choices else ""
         if not content:
             raise LLMProviderError("empty OpenRouter response")
-        return LLMResult(provider="openrouter", model=self.openrouter_model, content=content)
+        return LLMResult(provider="openrouter", model=model, content=content)
 
     def _post_json(self, url: str, payload: dict[str, Any], extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
         body = json.dumps(payload).encode("utf-8")
@@ -168,7 +198,12 @@ class LLMProposalService:
         try:
             result = self.provider.complete_json(system_prompt, user_prompt, self.PROPOSAL_SCHEMA)
             proposal = result.parsed or {}
-            provider_meta = {"provider": result.provider, "model": result.model, "fallback_used": result.fallback_used}
+            provider_meta = {
+                "provider": result.provider,
+                "model": result.model,
+                "fallback_used": result.fallback_used,
+                "attempted_models": result.attempted_models,
+            }
         except LLMProviderError as exc:
             proposal = self._local_pitch(prompt, context)
             provider_meta = {"provider": "local_fallback", "model": "deterministic", "error": str(exc)}
