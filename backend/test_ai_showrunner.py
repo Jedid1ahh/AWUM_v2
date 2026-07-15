@@ -224,6 +224,42 @@ class AIShowrunnerTests(unittest.TestCase):
         self.assertEqual(provider.openrouter_models[0], "custom/model:free")
         self.assertEqual(provider.openrouter_models[1:], DEFAULT_OPENROUTER_MODELS)
 
+    def test_llm_pitch_rejects_unknown_wrestler_names_and_uses_roster_fallback(self):
+        from services.llm_provider import LLMProposalService
+
+        class HallucinatingProvider:
+            def status(self):
+                return {"primary": "test"}
+
+            def complete_json(self, system_prompt, user_prompt, schema_hint=None):
+                from services.llm_provider import LLMResult
+                return LLMResult(
+                    provider="test",
+                    model="hallucination",
+                    content="{}",
+                    parsed={
+                        "title": "Heat-Up Payoff: The Rumble vs. The Viper",
+                        "summary": "Deliver an explosive payoff to the long-running feud between The Rumble and The Viper.",
+                        "category": "feud",
+                        "priority": "high",
+                        "proposal_type": "feud_payoff",
+                        "referenced_wrestlers": ["The Rumble", "The Viper"],
+                    },
+                )
+
+        service = LLMProposalService(self.service, HallucinatingProvider())
+        result = service.create_pitch(
+            "Suggest a feud payoff.",
+            context={"category": "feud", "proposal_type": "feud_payoff"},
+            year=1,
+            week=14,
+        )
+
+        approval = result["approval"]
+        self.assertEqual(result["provider"]["provider"], "local_fallback")
+        self.assertNotIn("The Rumble", approval["title"])
+        self.assertNotIn("The Viper", approval["summary"])
+        self.assertIn("Alpha Ace", approval["summary"])
 
     def test_external_llm_pitch_uses_approval_queue(self):
         from services.llm_provider import LLMProvider, LLMProposalService

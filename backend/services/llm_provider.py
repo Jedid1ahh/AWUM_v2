@@ -198,23 +198,29 @@ class LLMProposalService:
 
     def create_pitch(self, prompt: str, context: dict[str, Any] | None = None, year: int = 1, week: int = 1) -> dict[str, Any]:
         context = context or {}
+        game_context = self._game_context()
+        grounded_context = {**context, "game_state": game_context}
         system_prompt = (
             "You are AWUM's in-game assistant showrunner. Create one actionable proposal for the player's approval. "
-            "Never claim the world has already changed. Major changes must wait for approval."
+            "Never claim the world has already changed. Major changes must wait for approval. "
+            "Use ONLY wrestler names from game_state.active_roster_names and, for feud payoffs, prefer game_state.active_feuds. "
+            "If no suitable real wrestler exists, ask for more roster context instead of inventing names."
         )
-        user_prompt = json.dumps({"request": prompt, "context": context}, ensure_ascii=False)
+        user_prompt = json.dumps({"request": prompt, "context": grounded_context}, ensure_ascii=False)
         try:
             result = self.provider.complete_json(system_prompt, user_prompt, self.PROPOSAL_SCHEMA)
             proposal = result.parsed or {}
+            self._validate_proposal_grounding(proposal, game_context)
             provider_meta = {
                 "provider": result.provider,
                 "model": result.model,
                 "fallback_used": result.fallback_used,
                 "attempted_models": result.attempted_models,
+                "grounded": True,
             }
         except LLMProviderError as exc:
-            proposal = self._local_pitch(prompt, context)
-            provider_meta = {"provider": "local_fallback", "model": "deterministic", "error": str(exc)}
+            proposal = self._local_pitch(prompt, grounded_context)
+            provider_meta = {"provider": "local_fallback", "model": "deterministic", "error": str(exc), "grounded": True}
         item = self.enqueue_proposal(proposal, year=year, week=week, provider_meta=provider_meta)
         return {"proposal": proposal, "approval": item, "provider": provider_meta}
 
@@ -248,6 +254,38 @@ class LLMProposalService:
 
     def _local_pitch(self, prompt: str, context: dict[str, Any]) -> dict[str, Any]:
         clean = " ".join(str(prompt or "").split())
+        game_state = context.get("game_state") or {}
+        roster = game_state.get("active_roster") or []
+        feuds = game_state.get("active_feuds") or []
+        wants_feud = "feud" in clean.lower() or str(context.get("proposal_type", "")).lower() == "feud_payoff"
+        if wants_feud and feuds:
+            feud = feuds[0]
+            names = feud.get("participant_names") or []
+            if len(names) >= 2:
+                return {
+                    "title": f"Feud payoff: {names[0]} vs {names[1]}",
+                    "summary": f"Review a grounded payoff between active roster members {names[0]} and {names[1]} from an existing feud before anything is booked.",
+                    "category": "feud",
+                    "priority": "high" if int(feud.get("intensity") or 0) >= 80 else "opportunity",
+                    "proposal_type": "feud_payoff",
+                    "referenced_wrestlers": names[:2],
+                    "actions": [{"type": "review_feud_payoff", "parameters": {"feud_id": feud.get("id"), "participants": names[:2]}}],
+                    "effects_preview": {"grounded_roster_names": names[:2]},
+                    "source_type": "llm_feud_payoff",
+                }
+        if len(roster) >= 2:
+            first, second = roster[0], roster[1]
+            return {
+                "title": f"Grounded pitch: {first['name']} vs {second['name']}",
+                "summary": f"Review an LLM fallback pitch using real roster members {first['name']} and {second['name']}: {clean or 'Create a booking idea.'}",
+                "category": context.get("category", "booking"),
+                "priority": context.get("priority", "opportunity"),
+                "proposal_type": context.get("proposal_type", "match"),
+                "referenced_wrestlers": [first["name"], second["name"]],
+                "actions": [{"type": "review_grounded_pitch", "parameters": {"participants": [first["name"], second["name"]]}}],
+                "effects_preview": {"grounded_roster_names": [first["name"], second["name"]]},
+                "source_type": "llm_pitch",
+            }
         title = clean[:72] or "AI Pitch"
         return {
             "title": title,
@@ -255,7 +293,100 @@ class LLMProposalService:
             "category": context.get("category", "booking"),
             "priority": context.get("priority", "opportunity"),
             "proposal_type": context.get("proposal_type", "system"),
+            "referenced_wrestlers": [],
             "actions": [],
             "effects_preview": {},
             "source_type": "llm_pitch",
         }
+
+    def _game_context(self) -> dict[str, Any]:
+        conn = getattr(getattr(self.showrunner, "database", None), "conn", None)
+        if conn is None:
+            return {"active_roster": [], "active_roster_names": [], "active_feuds": []}
+        roster = []
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, name, role, primary_brand, popularity, momentum, morale
+                FROM wrestlers
+                WHERE COALESCE(is_retired, 0) = 0
+                ORDER BY popularity DESC, momentum DESC, name
+                LIMIT 40
+                """
+            ).fetchall()
+            roster = [dict(row) for row in rows]
+        except Exception:
+            roster = []
+        feuds = []
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, participant_names, intensity, status, match_count
+                FROM feuds
+                WHERE status != 'resolved'
+                ORDER BY intensity DESC, match_count DESC
+                LIMIT 12
+                """
+            ).fetchall()
+            for row in rows:
+                feud = dict(row)
+                try:
+                    feud["participant_names"] = json.loads(feud.get("participant_names") or "[]")
+                except Exception:
+                    feud["participant_names"] = []
+                feuds.append(feud)
+        except Exception:
+            feuds = []
+        return {
+            "active_roster": roster,
+            "active_roster_names": [row.get("name") for row in roster if row.get("name")],
+            "active_feuds": feuds,
+        }
+
+    def _validate_proposal_grounding(self, proposal: dict[str, Any], game_context: dict[str, Any]) -> None:
+        roster_names = {str(name) for name in game_context.get("active_roster_names", []) if name}
+        if not roster_names:
+            return
+        unknown = []
+        for name in self._proposal_referenced_names(proposal):
+            if name and name not in roster_names and name not in unknown:
+                unknown.append(name)
+        if unknown:
+            raise LLMProviderError(f"LLM proposal referenced wrestler(s) not in roster: {', '.join(unknown)}")
+
+    def _proposal_referenced_names(self, proposal: dict[str, Any]) -> list[str]:
+        names: list[str] = []
+
+        def add(value):
+            if isinstance(value, str):
+                cleaned = value.strip().strip(" .,;:!?")
+                if cleaned:
+                    names.append(cleaned)
+
+        def walk(value, key: str = ""):
+            if isinstance(value, dict):
+                for child_key, child_value in value.items():
+                    lowered = str(child_key).lower()
+                    if lowered in {"wrestler_name", "winner_name", "loser_name"} or (lowered == "name" and key in {"participants", "winner", "loser", "wrestlers", "referenced_wrestlers"}):
+                        add(child_value)
+                    elif lowered in {"referenced_wrestlers", "wrestler_names", "participant_names", "participants", "winner", "loser"}:
+                        walk(child_value, lowered)
+                    else:
+                        walk(child_value, lowered)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item, key)
+            elif key in {"referenced_wrestlers", "wrestler_names", "participant_names", "participants", "winner", "loser"}:
+                add(value)
+
+        walk(proposal)
+        text = " ".join(str(proposal.get(field) or "") for field in ("title", "summary", "rationale"))
+        for match in re.finditer(r"(?:^|[:;\-])\s*([A-Z][A-Za-z'’.-]*(?:\s+[A-Z][A-Za-z'’.-]*){0,3})\s+vs\.?\s+([A-Z][A-Za-z'’.-]*(?:\s+[A-Z][A-Za-z'’.-]*){0,3})", text):
+            add(match.group(1))
+            add(match.group(2))
+        for match in re.finditer(r"between\s+([A-Z][A-Za-z'’.-]*(?:\s+[A-Z][A-Za-z'’.-]*){0,3})\s+and\s+([A-Z][A-Za-z'’.-]*(?:\s+[A-Z][A-Za-z'’.-]*){0,3})", text):
+            add(match.group(1))
+            add(match.group(2))
+        for match in re.finditer(r"\b(The\s+[A-Z][A-Za-z'’.-]*)\b", text):
+            add(match.group(1))
+        return names
