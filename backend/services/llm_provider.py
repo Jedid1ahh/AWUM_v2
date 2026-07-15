@@ -199,18 +199,23 @@ class LLMProposalService:
     def create_pitch(self, prompt: str, context: dict[str, Any] | None = None, year: int = 1, week: int = 1) -> dict[str, Any]:
         context = context or {}
         game_context = self._game_context()
-        grounded_context = {**context, "game_state": game_context}
+        constraints = self._request_constraints(prompt, context)
+        game_context["request_constraints"] = constraints
+        grounded_context = {**context, "game_state": game_context, "request_constraints": constraints}
         system_prompt = (
             "You are AWUM's in-game assistant showrunner. Create one actionable proposal for the player's approval. "
             "Never claim the world has already changed. Major changes must wait for approval. "
             "Use ONLY wrestler names from game_state.active_roster_names and, for feud payoffs, prefer game_state.active_feuds. "
+            "Respect request_constraints exactly: if a brand is requested, every wrestler must belong to that brand; "
+            "if a gender division is requested, every wrestler must be in that division. Never suggest intergender matches. "
             "If no suitable real wrestler exists, ask for more roster context instead of inventing names."
         )
         user_prompt = json.dumps({"request": prompt, "context": grounded_context}, ensure_ascii=False)
         try:
             result = self.provider.complete_json(system_prompt, user_prompt, self.PROPOSAL_SCHEMA)
             proposal = result.parsed or {}
-            self._validate_proposal_grounding(proposal, game_context)
+            proposal.setdefault("constraints", constraints)
+            self._validate_proposal_grounding(proposal, game_context, constraints)
             provider_meta = {
                 "provider": result.provider,
                 "model": result.model,
@@ -255,8 +260,13 @@ class LLMProposalService:
     def _local_pitch(self, prompt: str, context: dict[str, Any]) -> dict[str, Any]:
         clean = " ".join(str(prompt or "").split())
         game_state = context.get("game_state") or {}
-        roster = game_state.get("active_roster") or []
-        feuds = game_state.get("active_feuds") or []
+        constraints = context.get("request_constraints") or game_state.get("request_constraints") or {}
+        roster = self._filter_roster_for_constraints(game_state.get("active_roster") or [], constraints)
+        allowed_names = {row.get("name") for row in roster}
+        feuds = [
+            feud for feud in (game_state.get("active_feuds") or [])
+            if not allowed_names or all(name in allowed_names for name in (feud.get("participant_names") or [])[:2])
+        ]
         wants_feud = "feud" in clean.lower() or str(context.get("proposal_type", "")).lower() == "feud_payoff"
         if wants_feud and feuds:
             feud = feuds[0]
@@ -268,6 +278,7 @@ class LLMProposalService:
                     "category": "feud",
                     "priority": "high" if int(feud.get("intensity") or 0) >= 80 else "opportunity",
                     "proposal_type": "feud_payoff",
+                    "constraints": constraints,
                     "referenced_wrestlers": names[:2],
                     "actions": [{"type": "review_feud_payoff", "parameters": {"feud_id": feud.get("id"), "participants": names[:2]}}],
                     "effects_preview": {"grounded_roster_names": names[:2]},
@@ -281,7 +292,9 @@ class LLMProposalService:
                 "category": context.get("category", "booking"),
                 "priority": context.get("priority", "opportunity"),
                 "proposal_type": context.get("proposal_type", "match"),
+                "constraints": constraints,
                 "referenced_wrestlers": [first["name"], second["name"]],
+                "target_brand": constraints.get("brand") or first.get("primary_brand"),
                 "actions": [{"type": "review_grounded_pitch", "parameters": {"participants": [first["name"], second["name"]]}}],
                 "effects_preview": {"grounded_roster_names": [first["name"], second["name"]]},
                 "source_type": "llm_pitch",
@@ -293,6 +306,7 @@ class LLMProposalService:
             "category": context.get("category", "booking"),
             "priority": context.get("priority", "opportunity"),
             "proposal_type": context.get("proposal_type", "system"),
+            "constraints": constraints,
             "referenced_wrestlers": [],
             "actions": [],
             "effects_preview": {},
@@ -307,7 +321,7 @@ class LLMProposalService:
         try:
             rows = conn.execute(
                 """
-                SELECT id, name, role, primary_brand, popularity, momentum, morale
+                SELECT id, name, gender, role, primary_brand, popularity, momentum, morale
                 FROM wrestlers
                 WHERE COALESCE(is_retired, 0) = 0
                 ORDER BY popularity DESC, momentum DESC, name
@@ -343,16 +357,69 @@ class LLMProposalService:
             "active_feuds": feuds,
         }
 
-    def _validate_proposal_grounding(self, proposal: dict[str, Any], game_context: dict[str, Any]) -> None:
-        roster_names = {str(name) for name in game_context.get("active_roster_names", []) if name}
+    def _request_constraints(self, prompt: str, context: dict[str, Any]) -> dict[str, Any]:
+        text = f"{prompt or ''} {json.dumps(context or {}, default=str)}".lower()
+        constraints: dict[str, Any] = {}
+        brand = context.get("brand") or context.get("target_brand") if isinstance(context, dict) else None
+        if not brand:
+            for candidate in ("Alpha", "Velocity", "Cross-Brand"):
+                if candidate.lower() in text:
+                    brand = candidate
+                    break
+        if brand:
+            constraints["brand"] = str(brand)
+        gender = context.get("gender") or context.get("division") if isinstance(context, dict) else None
+        if not gender:
+            if re.search(r"\b(male|men|men's|mens)\b", text):
+                gender = "Male"
+            elif re.search(r"\b(female|women|women's|womens)\b", text):
+                gender = "Female"
+        if gender:
+            normalized = str(gender).lower()
+            constraints["gender"] = "Female" if normalized.startswith(("female", "women", "womens")) else "Male"
+        return constraints
+
+    def _filter_roster_for_constraints(self, roster: list[dict[str, Any]], constraints: dict[str, Any]) -> list[dict[str, Any]]:
+        filtered = list(roster)
+        brand = constraints.get("brand")
+        if brand:
+            filtered = [row for row in filtered if str(row.get("primary_brand") or "").lower() == str(brand).lower()]
+        gender = constraints.get("gender")
+        if gender:
+            filtered = [row for row in filtered if str(row.get("gender") or "").lower() == str(gender).lower()]
+        return filtered
+
+    def _validate_proposal_grounding(self, proposal: dict[str, Any], game_context: dict[str, Any], constraints: dict[str, Any] | None = None) -> None:
+        constraints = constraints or {}
+        roster_by_name = {str(row.get("name")): row for row in game_context.get("active_roster", []) if row.get("name")}
+        roster_names = set(roster_by_name)
         if not roster_names:
             return
         unknown = []
+        referenced_rows = []
         for name in self._proposal_referenced_names(proposal):
             if name and name not in roster_names and name not in unknown:
                 unknown.append(name)
+            elif name in roster_by_name:
+                referenced_rows.append(roster_by_name[name])
         if unknown:
             raise LLMProviderError(f"LLM proposal referenced wrestler(s) not in roster: {', '.join(unknown)}")
+        bad_brand = []
+        requested_brand = constraints.get("brand")
+        if requested_brand:
+            for row in referenced_rows:
+                if str(row.get("primary_brand") or "").lower() != str(requested_brand).lower():
+                    bad_brand.append(row.get("name"))
+        if bad_brand:
+            raise LLMProviderError(f"LLM proposal used wrestler(s) outside requested {requested_brand} brand: {', '.join(bad_brand)}")
+        requested_gender = constraints.get("gender")
+        if requested_gender:
+            bad_gender = [row.get("name") for row in referenced_rows if str(row.get("gender") or "").lower() != str(requested_gender).lower()]
+            if bad_gender:
+                raise LLMProviderError(f"LLM proposal used wrestler(s) outside requested {requested_gender} division: {', '.join(bad_gender)}")
+        proposal_type = str(proposal.get("proposal_type") or proposal.get("type") or "").lower()
+        if proposal_type in {"match", "feud_payoff"} and len({str(row.get("gender") or "").lower() for row in referenced_rows if row.get("gender")}) > 1:
+            raise LLMProviderError("LLM proposal attempted an intergender match, which only the player may book.")
 
     def _proposal_referenced_names(self, proposal: dict[str, Any]) -> list[str]:
         names: list[str] = []

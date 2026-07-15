@@ -370,6 +370,116 @@ class AIShowrunnerTests(unittest.TestCase):
         self.assertIsNotNone(promise)
         self.assertEqual(promise["promise_type"], "push")
 
+    def test_llm_pitch_respects_requested_brand_and_gender_constraints(self):
+        from services.llm_provider import LLMProposalService
+
+        now = "2026-06-30T00:00:00"
+        extra = [
+            ("w_alpha_m1", "Alpha King", 32, "Male", "face", "main_event", "Alpha", 80, 75, 70, 82, 78, 72, 10, 1, 91, 20, 72, 5, "None", None, 0, 200000, 80, 40, 1, 1, 0),
+            ("w_alpha_m2", "Alpha Duke", 30, "Male", "heel", "upper_midcard", "Alpha", 78, 72, 74, 77, 75, 70, 8, 0, 88, 18, 70, 5, "None", None, 0, 180000, 80, 40, 1, 1, 0),
+            ("w_vel_m1", "Velocity Rogue", 33, "Male", "heel", "main_event", "Velocity", 81, 73, 76, 83, 77, 71, 11, 1, 93, 22, 74, 4, "None", None, 0, 210000, 80, 40, 1, 1, 0),
+        ]
+        self.database.conn.executemany(
+            """
+            INSERT OR REPLACE INTO wrestlers (
+                id, name, age, gender, alignment, role, primary_brand,
+                brawling, technical, speed, mic, psychology, stamina,
+                years_experience, is_major_superstar, popularity, momentum,
+                morale, fatigue, injury_severity, injury_description,
+                injury_weeks_remaining, contract_salary, contract_total_weeks,
+                contract_weeks_remaining, contract_signing_year,
+                contract_signing_week, is_retired, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [row + (now, now) for row in extra],
+        )
+        self.database.conn.commit()
+
+        class WrongBrandProvider:
+            def complete_json(self, system_prompt, user_prompt, schema_hint=None):
+                from services.llm_provider import LLMResult
+                return LLMResult(
+                    provider="test",
+                    model="wrong-brand",
+                    content="{}",
+                    parsed={
+                        "title": "Velocity Rogue vs Alpha King promo",
+                        "summary": "Velocity Rogue confronts Alpha King on Alpha.",
+                        "category": "promo",
+                        "proposal_type": "promo",
+                        "referenced_wrestlers": ["Velocity Rogue", "Alpha King"],
+                    },
+                )
+
+        service = LLMProposalService(self.service, WrongBrandProvider())
+        result = service.create_pitch(
+            "Suggest a promo beat between two top male stars on the Alpha brand for next ROC Alpha weekly show.",
+            context={},
+            year=1,
+            week=17,
+        )
+
+        self.assertEqual(result["provider"]["provider"], "local_fallback")
+        self.assertIn("Alpha King", result["approval"]["summary"])
+        self.assertIn("Alpha Duke", result["approval"]["summary"])
+        self.assertNotIn("Velocity Rogue", result["approval"]["summary"])
+
+    def test_approved_llm_intergender_match_is_blocked(self):
+        approval = self.service.queue_external_item(
+            1,
+            18,
+            "llm_pitch",
+            "intergender_pitch",
+            "match",
+            "high",
+            "Book Alpha Ace vs Gamma Prospect",
+            "AI should not book intergender matches.",
+            {
+                "llm_proposal": {
+                    "title": "Book Alpha Ace vs Gamma Prospect",
+                    "summary": "Alpha Ace faces Gamma Prospect.",
+                    "proposal_type": "match",
+                    "referenced_wrestlers": ["Alpha Ace", "Gamma Prospect"],
+                }
+            },
+            "ask",
+        )
+
+        self.service.decide_approval(approval["id"], {"decision": "approve"})
+        execution = self.database.conn.execute(
+            "SELECT * FROM llm_proposal_executions WHERE approval_id = ?",
+            (approval["id"],),
+        ).fetchone()
+        self.assertEqual(execution["status"], "blocked")
+        self.assertIn("intergender", execution["result_json"])
+
+    def test_approved_llm_segment_appears_in_latest_booking_draft(self):
+        self.service.run_weekly(1, 19, seed=88, force=True, autonomy_level="balanced")
+        approval = self.service.queue_external_item(
+            1,
+            19,
+            "llm_pitch",
+            "promo_pitch",
+            "promo",
+            "high",
+            "Promo beat: Alpha Ace and Beta Brawler",
+            "A grounded promo beat for the latest AI card.",
+            {
+                "llm_proposal": {
+                    "title": "Promo beat: Alpha Ace and Beta Brawler",
+                    "summary": "Alpha Ace and Beta Brawler trade promo beats before the main event.",
+                    "proposal_type": "promo",
+                    "referenced_wrestlers": ["Alpha Ace", "Beta Brawler"],
+                }
+            },
+            "ask",
+        )
+        self.service.decide_approval(approval["id"], {"decision": "approve"})
+
+        draft = self.service.latest_booking_draft()
+        segment_names = [segment.get("display_name") or segment.get("description") for segment in draft["show_draft"].get("segments", [])]
+        self.assertTrue(any("Alpha Ace and Beta Brawler" in str(name) for name in segment_names))
+
 
 if __name__ == "__main__":
     unittest.main()

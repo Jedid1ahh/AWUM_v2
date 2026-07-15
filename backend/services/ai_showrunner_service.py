@@ -52,6 +52,7 @@ class AIShowrunnerService:
         )
         if last_run:
             self._decode_run(last_run)
+            self._append_approved_llm_segments_to_card(last_run.get("generated_card_json") or {}, last_run.get("show_id"))
         special = self._special_system_snapshot()
         return {
             "summary": {
@@ -311,13 +312,13 @@ class AIShowrunnerService:
         player's existing show/card surfaces can consume the approved item.
         """
         self._ensure_llm_execution_table()
-        unknown = self._unknown_wrestler_names(proposal)
-        if unknown:
+        grounding_error = self._llm_execution_grounding_error(proposal)
+        if grounding_error:
             return self._record_llm_execution(
                 approval_item,
                 proposal,
                 "blocked",
-                {"error": "unknown_wrestlers", "unknown_wrestlers": unknown},
+                grounding_error,
             )
 
         proposal_type = str(proposal.get("proposal_type") or proposal.get("type") or approval_item.get("category") or "segment").lower()
@@ -330,9 +331,32 @@ class AIShowrunnerService:
         return self._record_llm_execution(approval_item, proposal, "executed", result)
 
     def _insert_llm_booking_segment(self, approval_item: dict, proposal: dict, proposal_type: str) -> dict:
-        year = int(approval_item.get("year") or 1)
-        week = int(approval_item.get("week") or 1)
-        show = self._current_show(None, year, week)
+        year = int(approval_item.get("year") or approval_item.get("deadline_year") or 1)
+        week = int(approval_item.get("week") or approval_item.get("deadline_week") or 1)
+        latest_run = self.repo.fetch_one(
+            """
+            SELECT show_id, show_name, brand, year, week
+            FROM ai_showrunner_runs
+            WHERE deleted_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        )
+        if latest_run and not proposal.get("target_show_id"):
+            show = {
+                "show_id": latest_run["show_id"],
+                "name": latest_run["show_name"],
+                "brand": latest_run["brand"],
+                "show_type": "weekly_tv",
+                "is_ppv": False,
+            }
+            year = int(latest_run.get("year") or year)
+            week = int(latest_run.get("week") or week)
+        else:
+            show = self._current_show(None, year, week)
+        constraints = proposal.get("constraints") or {}
+        if constraints.get("brand"):
+            show = {**show, "brand": constraints.get("brand"), "name": proposal.get("target_show_name") or f"ROC {constraints.get('brand')} Weekly"}
         now = self.now()
         self.conn.execute(
             """
@@ -405,14 +429,38 @@ class AIShowrunnerService:
         self.conn.commit()
         return row
 
-    def _unknown_wrestler_names(self, proposal: dict) -> list[str]:
-        roster_rows = self.repo.fetch_all("SELECT name FROM wrestlers WHERE COALESCE(is_retired, 0) = 0")
-        roster = {row["name"] for row in roster_rows}
+    def _llm_execution_grounding_error(self, proposal: dict) -> dict | None:
+        roster_rows = self.repo.fetch_all("SELECT id, name, gender, primary_brand FROM wrestlers WHERE COALESCE(is_retired, 0) = 0")
+        roster = {row["name"]: row for row in roster_rows}
+        names = self._proposal_referenced_names_from_payload(proposal)
+        unknown = sorted(name for name in names if name and name not in roster)
+        if unknown:
+            return {"error": "unknown_wrestlers", "unknown_wrestlers": unknown}
+        rows = [roster[name] for name in names if name in roster]
+        constraints = proposal.get("constraints") or {}
+        brand = constraints.get("brand") or proposal.get("target_brand")
+        if brand:
+            bad_brand = sorted(row["name"] for row in rows if str(row.get("primary_brand") or "").lower() != str(brand).lower())
+            if bad_brand:
+                return {"error": "wrong_brand", "requested_brand": brand, "wrestlers": bad_brand}
+        gender = constraints.get("gender") or proposal.get("target_gender")
+        if gender:
+            bad_gender = sorted(row["name"] for row in rows if str(row.get("gender") or "").lower() != str(gender).lower())
+            if bad_gender:
+                return {"error": "wrong_gender", "requested_gender": gender, "wrestlers": bad_gender}
+        proposal_type = str(proposal.get("proposal_type") or proposal.get("type") or "").lower()
+        if proposal_type in {"match", "feud_payoff"}:
+            genders = {str(row.get("gender") or "").lower() for row in rows if row.get("gender")}
+            if len(genders) > 1:
+                return {"error": "intergender_match_blocked", "message": "Showrunner AI may not book intergender matches."}
+        return None
+
+    def _proposal_referenced_names_from_payload(self, proposal: dict) -> list[str]:
         referenced = set()
         for key in ("wrestler_name", "winner_name", "loser_name", "opponent_name"):
             if proposal.get(key):
                 referenced.add(str(proposal[key]).strip())
-        for key in ("wrestlers", "participants", "referenced_wrestlers"):
+        for key in ("wrestlers", "participants", "referenced_wrestlers", "participant_names"):
             value = proposal.get(key)
             if isinstance(value, list):
                 for item in value:
@@ -424,10 +472,15 @@ class AIShowrunnerService:
             text = str(proposal.get(text_key) or "")
             for left, right in re.findall(r"([A-Z][A-Za-z0-9 .'-]{1,40})\s+vs\.?\s+([A-Z][A-Za-z0-9 .'-]{1,40})", text):
                 referenced.update({self._clean_referenced_name(left), self._clean_referenced_name(right)})
-        return sorted(name for name in referenced if name and name not in roster)
+        return sorted(name for name in referenced if name)
+
+    def _unknown_wrestler_names(self, proposal: dict) -> list[str]:
+        roster_rows = self.repo.fetch_all("SELECT name FROM wrestlers WHERE COALESCE(is_retired, 0) = 0")
+        roster = {row["name"] for row in roster_rows}
+        return sorted(name for name in self._proposal_referenced_names_from_payload(proposal) if name and name not in roster)
 
     def _clean_referenced_name(self, name: str) -> str:
-        return re.sub(r"^(Book|Approve|Run|Feature|Build|Heat-Up Payoff:)\s+", "", str(name).strip(), flags=re.IGNORECASE).strip()
+        return re.sub(r"^(Book|Approve|Run|Feature|Build|Promo beat:|Heat-Up Payoff:)\s+", "", str(name).strip(), flags=re.IGNORECASE).strip()
 
     def _execute_rejected_world_change(self, approval_row: dict) -> None:
         """
@@ -637,9 +690,13 @@ class AIShowrunnerService:
             """
         )
         if not run:
+            llm_draft = self._latest_llm_only_booking_draft()
+            if llm_draft:
+                return llm_draft
             return {"available": False, "message": "No AI Showrunner draft has been generated yet."}
         self._decode_run(run)
         card = run.get("generated_card_json") or {}
+        self._append_approved_llm_segments_to_card(card, run["show_id"])
         draft = self._card_to_booking_draft(run, card)
         self._append_scheduled_crown_matches_to_draft(draft)
         self._append_scheduled_cash_in_matches_to_draft(draft)
@@ -3003,6 +3060,78 @@ class AIShowrunnerService:
                     })
                     seen.add(match_id)
                     next_position += 1
+
+    def _append_approved_llm_segments_to_card(self, card: dict, show_id: str | None) -> None:
+        if not show_id or not isinstance(card, dict):
+            return
+        rows = self.repo.fetch_all(
+            """
+            SELECT * FROM booking_segments
+            WHERE show_id = ? AND item_type = 'llm_approved' AND allocation_status = 'approved_llm' AND deleted_at IS NULL
+            ORDER BY card_position
+            """,
+            (show_id,),
+        )
+        existing_ids = {item.get("id") for item in card.get("segments", [])}
+        for row in rows:
+            segment = self._llm_booking_row_to_card_segment(row)
+            if segment and segment.get("id") not in existing_ids:
+                card.setdefault("segments", []).append(segment)
+                existing_ids.add(segment.get("id"))
+        card["segments"] = sorted(card.get("segments", []), key=lambda item: int(item.get("position") or 999))
+
+    def _latest_llm_only_booking_draft(self) -> dict | None:
+        plan = self.repo.fetch_one(
+            """
+            SELECT bsp.* FROM booking_show_plans bsp
+            JOIN booking_segments bs ON bs.show_id = bsp.show_id
+            WHERE bs.item_type = 'llm_approved' AND bs.allocation_status = 'approved_llm' AND bs.deleted_at IS NULL
+            ORDER BY bs.created_at DESC
+            LIMIT 1
+            """
+        )
+        if not plan:
+            return None
+        card = {
+            "show_id": plan["show_id"],
+            "show_name": plan["show_name"],
+            "brand": plan["brand"],
+            "show_type": plan["show_type"],
+            "creative_goal": "Approved LLM booking proposals",
+            "segments": [],
+        }
+        self._append_approved_llm_segments_to_card(card, plan["show_id"])
+        run = {"id": "llm_approved_only", "show_id": plan["show_id"], "show_name": plan["show_name"], "brand": plan["brand"], "year": plan["year"], "week": plan["week"]}
+        return {"available": True, "run": run, "show_draft": self._card_to_booking_draft(run, card), "source": "approved_llm"}
+
+    def _llm_booking_row_to_card_segment(self, row: dict) -> dict | None:
+        try:
+            payload = self.repo.from_json(row.get("payload_json"), {})
+        except Exception:
+            payload = {}
+        proposal = payload.get("proposal") or {}
+        names = self._proposal_referenced_names_from_payload(proposal)
+        participants = []
+        if names:
+            placeholders = ",".join("?" for _ in names)
+            roster_rows = self.repo.fetch_all(f"SELECT id, name, role, gender, primary_brand FROM wrestlers WHERE name IN ({placeholders})", tuple(names))
+            by_name = {r["name"]: r for r in roster_rows}
+            for name in names:
+                if name in by_name:
+                    r = by_name[name]
+                    participants.append({"id": r["id"], "name": r["name"], "role": r.get("role"), "gender": r.get("gender"), "brand": r.get("primary_brand")})
+        proposal_type = str(proposal.get("proposal_type") or row.get("segment_type") or "promo").lower()
+        segment_type = "match" if proposal_type in {"match", "feud_payoff"} else "promo" if proposal_type in {"promo", "promo_beat"} else proposal_type
+        return {
+            "id": row["id"],
+            "segment_type": segment_type,
+            "position": row.get("card_position"),
+            "duration": row.get("planned_duration_minutes") or 6,
+            "description": proposal.get("summary") or proposal.get("title") or "Approved LLM booking proposal",
+            "participants": participants,
+            "winner": None,
+            "mechanical_effects": ["Approved from My Inbox", "Grounded against live roster"],
+        }
 
     def _card_to_booking_draft(self, run: dict, card: dict) -> dict:
         matches = []
