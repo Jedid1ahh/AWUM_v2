@@ -294,6 +294,15 @@ class PhaseExpansionRepository:
         item["player_response"] = self.from_json(item.pop("player_response_json", None), {})
         item["requires_response"] = bool(item.get("requires_response"))
         item["auto_execute_allowed"] = bool(item.get("auto_execute_allowed"))
+        if item.get("approval_id"):
+            approval = self.fetch_one("SELECT * FROM booker_approval_queue WHERE id = ? AND deleted_at IS NULL", (item["approval_id"],))
+            if approval:
+                approval = dict(approval)
+                approval["recommendation_json"] = self.from_json(approval.get("recommendation_json"), {})
+                approval["player_response_json"] = self.from_json(approval.get("player_response_json"), {})
+                item["approval_item"] = approval
+                approval_status = approval.get("status")
+                item["status"] = "open" if approval_status == "pending" else (approval_status or item.get("status"))
         return item
 
     def get_lookup_values(self, category: str | None = None) -> dict | list:

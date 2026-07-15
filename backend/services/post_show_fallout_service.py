@@ -317,6 +317,8 @@ class PostShowFalloutService:
                         "counter_pitch": response["counter_pitch"],
                     },
                 )
+                refreshed = self.repo.fetch_one("SELECT * FROM post_show_fallout_items WHERE id = ?", (item_id,))
+                return self.repo._decode_post_show_item(refreshed) if refreshed else updated
             except Exception:
                 pass
         return updated

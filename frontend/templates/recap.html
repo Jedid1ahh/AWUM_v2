@@ -666,13 +666,20 @@
             var actionHtml = (item.suggested_actions || []).slice(0, 3).map(function(action) {
                 return '<li>' + recapHtml(action) + '</li>';
             }).join('');
-            var buttons = item.status === 'open'
-                ? '<div class="btn-group btn-group-sm mt-3 post-fallout-actions" data-item-id="' + recapAttr(item.id) + '">' +
-                    '<button type="button" class="btn btn-outline-success" data-fallout-decision="approve">Approve</button>' +
-                    '<button type="button" class="btn btn-outline-primary" data-fallout-decision="counter">Counter</button>' +
-                    '<button type="button" class="btn btn-outline-secondary" data-fallout-decision="dismiss">Dismiss</button>' +
-                  '</div>'
-                : '<span class="badge bg-secondary mt-3">Resolved: ' + recapHtml(item.status) + '</span>';
+            var buttons = item.approval_item
+                ? window.renderApprovalCard(item.approval_item, {
+                    cardClass: 'mt-3 post-fallout-approval-card',
+                    titleClass: 'small fw-bold',
+                    metaClass: 'small text-muted',
+                    decisionFn: 'decideRecapApproval'
+                  })
+                : (item.status === 'open'
+                    ? '<div class="btn-group btn-group-sm mt-3 post-fallout-actions" data-item-id="' + recapAttr(item.id) + '">' +
+                        '<button type="button" class="btn btn-outline-success" data-fallout-decision="approve">Approve</button>' +
+                        '<button type="button" class="btn btn-outline-primary" data-fallout-decision="counter">Counter</button>' +
+                        '<button type="button" class="btn btn-outline-secondary" data-fallout-decision="dismiss">Dismiss</button>' +
+                      '</div>'
+                    : '<span class="badge bg-secondary mt-3">Resolved: ' + recapHtml(item.status) + '</span>');
 
             return '<div class="col-lg-6 mb-3">' +
                 '<div class="card h-100 ' + border + '">' +
@@ -1788,6 +1795,20 @@
             console.error('Failed to decide post-show fallout:', error);
             if (window.showToast) showToast(error.message, 'danger');
             else alert(error.message);
+        }
+    };
+
+    window.decideRecapApproval = async function(approvalId, decision) {
+        try {
+            await window.decideApprovalQueueItem(approvalId, decision, {
+                surface: 'Post-show recap',
+                counterPrompt: 'Counter-pitch this fallout response:',
+                counterDefault: 'Keep the consequence, but adjust next week\'s creative direction.'
+            });
+            if (window.showToast) showToast('Post-show approval updated', 'success');
+            loadPersistentPostShowFallout(true);
+        } catch (error) {
+            if (window.showToast) showToast('Fallout approval failed: ' + error.message, 'danger');
         }
     };
 
