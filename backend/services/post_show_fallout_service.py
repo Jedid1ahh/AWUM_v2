@@ -300,6 +300,7 @@ class PostShowFalloutService:
             "decision": decision,
             "notes": data.get("notes", ""),
             "counter_pitch": data.get("counter_pitch", ""),
+            "selected_action": data.get("selected_action", ""),
             "decided_at": self.now(),
         }
         updated = self.repo.decide_post_show_fallout_item(item_id, status_map[decision], response)

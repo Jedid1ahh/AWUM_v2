@@ -72,9 +72,10 @@ if (typeof window.fetchAPI === 'undefined') {
     console.log('✅ AWUM API client loaded');
 }
 
-// Also create local references for convenience
-const fetchAPI = window.fetchAPI;
-const getAPI = window.getAPI;
-const postAPI = window.postAPI;
-const putAPI = window.putAPI;
-const deleteAPI = window.deleteAPI;
+// API helpers live on window so this script can be evaluated repeatedly
+// by dynamically loaded Flask views without block-scoped redeclaration errors.
+window.fetchAPI = window.fetchAPI;
+window.getAPI = window.getAPI;
+window.postAPI = window.postAPI;
+window.putAPI = window.putAPI;
+window.deleteAPI = window.deleteAPI;

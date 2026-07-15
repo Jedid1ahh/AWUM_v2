@@ -1943,11 +1943,11 @@ class AIShowrunnerService:
         rng: random.Random | None = None,
     ) -> dict:
         """
-        Build an 8-competitor single-elimination King/Queen of the Ring
-        bracket: QF1-4 -> SF1 (QF1 winner vs QF3 winner), SF2 (QF2 winner
-        vs QF4 winner) -> Final. All rounds are scheduled onto existing
-        weekly shows or minor PLEs - never a dedicated event of its own -
-        and the Final always lands before Summer Slamfest.
+        Build a 16-competitor single-elimination King/Queen of the Ring
+        bracket: Round of 16 -> Quarterfinal -> Semifinal -> Final. All
+        rounds are scheduled onto existing weekly shows or minor PLEs - never
+        a dedicated event of its own - and the Final always lands before
+        Summer Slamfest.
         """
         if tournament_type not in ("king", "queen"):
             return {"error": "tournament_type must be 'king' or 'queen'"}
@@ -1964,50 +1964,51 @@ class AIShowrunnerService:
             return self._decode_crown_tournament(existing)
 
         candidates = [w for w in roster if str(w.get("gender", "")).lower() == gender.lower()]
-        candidates = sorted(candidates, key=lambda w: (-float(w.get("overall") or 0), -float(w.get("popularity") or 0)))[:8]
-        if len(candidates) < 8:
-            return {"error": f"not enough {gender} roster members for an 8-competitor bracket (have {len(candidates)}, need 8)"}
+        candidates = sorted(candidates, key=lambda w: (-float(w.get("overall") or 0), -float(w.get("popularity") or 0)))[:16]
+        if len(candidates) < 16:
+            return {"error": f"not enough {gender} roster members for a 16-competitor bracket (have {len(candidates)}, need 16)"}
 
-        qf_week = min(51, week + 2)
-        sf_week = min(51, week + 6)
-        final_info = self._next_minor_ple(universe, year, sf_week, before_week=32)
-
-        qf_shows = [self._find_show_for_week(universe, year, min(51, qf_week + (i % 2))) for i in range(4)]
-        sf_shows = [self._find_show_for_week(universe, year, min(51, sf_week + (i % 2))) for i in range(2)]
+        # User-requested tournament cadence: R16 in weeks 14-15 across Alpha/Velocity,
+        # QFs and SFs in week 16-17, Final at the next minor PLE before Summer Slamfest.
+        r16_weeks = [14, 14, 14, 14, 15, 15, 15, 15]
+        qf_weeks = [16, 16, 17, 17]
+        sf_weeks = [17, 17]
+        r16_shows = [self._find_show_for_week(universe, year, w) for w in r16_weeks]
+        qf_shows = [self._find_show_for_week(universe, year, w) for w in qf_weeks]
+        sf_shows = [self._find_show_for_week(universe, year, w) for w in sf_weeks]
+        final_info = self._next_minor_ple(universe, year, 17, before_week=32)
 
         seeds = [{"id": w["id"], "name": w["name"]} for w in candidates]
         rounds = [
             {
                 "round": 1,
-                "round_name": "Quarterfinal",
+                "round_name": "Round of 16",
                 "matches": [
-                    {
-                        "match_num": i + 1,
-                        "wrestler_a": seeds[i * 2],
-                        "wrestler_b": seeds[i * 2 + 1],
-                        "winner": None,
-                        "scheduled": qf_shows[i],
-                    }
-                    for i in range(4)
+                    {"match_num": i + 1, "wrestler_a": seeds[i * 2], "wrestler_b": seeds[i * 2 + 1], "winner": None, "scheduled": r16_shows[i]}
+                    for i in range(8)
                 ],
             },
             {
                 "round": 2,
-                "round_name": "Semifinal",
+                "round_name": "Quarterfinal",
                 "matches": [
-                    {"match_num": 1, "wrestler_a": None, "wrestler_b": None, "winner": None,
-                     "feeds_from": [1, 3], "scheduled": sf_shows[0]},
-                    {"match_num": 2, "wrestler_a": None, "wrestler_b": None, "winner": None,
-                     "feeds_from": [2, 4], "scheduled": sf_shows[1]},
+                    {"match_num": i + 1, "wrestler_a": None, "wrestler_b": None, "winner": None,
+                     "feeds_from": [i * 2 + 1, i * 2 + 2], "scheduled": qf_shows[i]}
+                    for i in range(4)
                 ],
             },
             {
                 "round": 3,
-                "round_name": "Final",
+                "round_name": "Semifinal",
                 "matches": [
-                    {"match_num": 1, "wrestler_a": None, "wrestler_b": None, "winner": None,
-                     "feeds_from": [1, 2], "scheduled": final_info},
+                    {"match_num": 1, "wrestler_a": None, "wrestler_b": None, "winner": None, "feeds_from": [1, 2], "scheduled": sf_shows[0]},
+                    {"match_num": 2, "wrestler_a": None, "wrestler_b": None, "winner": None, "feeds_from": [3, 4], "scheduled": sf_shows[1]},
                 ],
+            },
+            {
+                "round": 4,
+                "round_name": "Final",
+                "matches": [{"match_num": 1, "wrestler_a": None, "wrestler_b": None, "winner": None, "feeds_from": [1, 2], "scheduled": final_info}],
             },
         ]
         bracket = {"tournament_type": tournament_type, "division": gender, "rounds": rounds}
@@ -2020,7 +2021,7 @@ class AIShowrunnerService:
                 id, name, prize_type, prize_description, format, participant_count,
                 status, duration_shows, seeding_logic, narrative_arc_score, bracket_json,
                 start_year, start_week, created_at, updated_at, deleted_at
-            ) VALUES (?, ?, 'title_opportunity', ?, 'single_elimination', 8, 'active', 3,
+            ) VALUES (?, ?, 'title_opportunity', ?, 'single_elimination', 16, 'active', 5,
                       'ranking', 50, ?, ?, ?, ?, ?, NULL)
             """,
             (
@@ -2039,19 +2040,22 @@ class AIShowrunnerService:
                 """,
                 (new_id("tournament_entry"), tournament_id, w["id"], w["name"], seed, now, now),
             )
-        for match in rounds[0]["matches"]:
-            self.conn.execute(
-                """
-                INSERT INTO tournament_matches (
-                    id, tournament_id, show_id, round_number, bracket_position,
-                    wrestler_a_id, wrestler_b_id, winner_id, status, created_at, updated_at, deleted_at
-                ) VALUES (?, ?, ?, 1, ?, ?, ?, NULL, 'scheduled', ?, ?, NULL)
-                """,
-                (
-                    new_id("tournament_match"), tournament_id, match["scheduled"].get("show_id"),
-                    match["match_num"], match["wrestler_a"]["id"], match["wrestler_b"]["id"], now, now,
-                ),
-            )
+        for round_data in rounds:
+            for match in round_data["matches"]:
+                if not match.get("wrestler_a") or not match.get("wrestler_b"):
+                    continue
+                self.conn.execute(
+                    """
+                    INSERT INTO tournament_matches (
+                        id, tournament_id, show_id, round_number, bracket_position,
+                        wrestler_a_id, wrestler_b_id, winner_id, status, created_at, updated_at, deleted_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'scheduled', ?, ?, NULL)
+                    """,
+                    (
+                        new_id("tournament_match"), tournament_id, match["scheduled"].get("show_id"), round_data["round"],
+                        match["match_num"], match["wrestler_a"]["id"], match["wrestler_b"]["id"], now, now,
+                    ),
+                )
         self.conn.commit()
         return self._decode_crown_tournament(self.repo.fetch_one("SELECT * FROM tournaments WHERE id = ?", (tournament_id,)))
 
@@ -2399,7 +2403,7 @@ class AIShowrunnerService:
         return result
 
     def _refresh_crown_payoff_system(self, year: int, week: int, roster: list[dict], universe, rng: random.Random) -> list[dict]:
-        target_name, target_year, target_week = self._target_event(universe, year, week, ["Summer", "Champions", "Clash"], fallback_name="Crown Tournament Payoff")
+        target_name, target_year, target_week = self._target_event(universe, year, week, ["Summer Slamfest", "Summer"], fallback_name="Summer Slamfest")
         created = []
         for tournament_type, division, gender in (("king", "mens", "Male"), ("queen", "womens", "Female")):
             existing = self.repo.fetch_one(
@@ -2789,9 +2793,10 @@ class AIShowrunnerService:
                         "side_b": {"wrestler_ids": [b["id"]], "wrestler_names": [b["name"]], "is_tag_team": False},
                         "booked_winner": (match.get("winner") or {}).get("id"),
                         "booking_bias": "even",
-                        "importance": "tournament",
-                        "planned_duration_minutes": 12 if round_data["round"] < 3 else 18,
-                        "duration": 12 if round_data["round"] < 3 else 18,
+                        "importance": "main_event" if round_data.get("round_name") in {"Quarterfinal", "Semifinal", "Final"} else "tournament",
+                        "planned_duration_minutes": 12 if round_data["round"] < 4 else 18,
+                        "duration": 12 if round_data["round"] < 4 else 18,
+                        "is_main_event": round_data.get("round_name") in {"Quarterfinal", "Semifinal", "Final"},
                         "position": next_position,
                         "card_position": next_position,
                         "is_title_match": False,
