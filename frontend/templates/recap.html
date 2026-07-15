@@ -667,10 +667,10 @@
                 return '<li>' + recapHtml(action) + '</li>';
             }).join('');
             var buttons = item.status === 'open'
-                ? '<div class="btn-group btn-group-sm mt-3">' +
-                    '<button class="btn btn-outline-success" onclick="decidePostShowFalloutItem(\'' + recapAttr(item.id) + '\', \'approve\')">Approve</button>' +
-                    '<button class="btn btn-outline-primary" onclick="decidePostShowFalloutItem(\'' + recapAttr(item.id) + '\', \'counter\')">Counter</button>' +
-                    '<button class="btn btn-outline-secondary" onclick="decidePostShowFalloutItem(\'' + recapAttr(item.id) + '\', \'dismiss\')">Dismiss</button>' +
+                ? '<div class="btn-group btn-group-sm mt-3 post-fallout-actions" data-item-id="' + recapAttr(item.id) + '">' +
+                    '<button type="button" class="btn btn-outline-success" data-fallout-decision="approve">Approve</button>' +
+                    '<button type="button" class="btn btn-outline-primary" data-fallout-decision="counter">Counter</button>' +
+                    '<button type="button" class="btn btn-outline-secondary" data-fallout-decision="dismiss">Dismiss</button>' +
                   '</div>'
                 : '<span class="badge bg-secondary mt-3">Resolved: ' + recapHtml(item.status) + '</span>';
 
@@ -1754,6 +1754,17 @@
     window.decidePostShowFalloutItem = async function(itemId, decision) {
         try {
             var counterPitch = '';
+            var selectedAction = '';
+            var item = null;
+            if (postShowFallout && postShowFallout.items) {
+                item = postShowFallout.items.find(function(entry) { return String(entry.id) === String(itemId); });
+            }
+            if (decision === 'approve' && item && item.suggested_actions && item.suggested_actions.length) {
+                var menu = item.suggested_actions.map(function(action, index) { return (index + 1) + '. ' + action; }).join('\n');
+                var choice = prompt('Choose the next move to carry out:\n' + menu, '1');
+                var idx = parseInt(choice || '1', 10) - 1;
+                selectedAction = item.suggested_actions[Math.max(0, Math.min(item.suggested_actions.length - 1, isNaN(idx) ? 0 : idx))] || '';
+            }
             if (decision === 'counter') {
                 counterPitch = prompt('Counter-pitch this fallout response:', 'Keep the consequence, but adjust next week\'s creative direction.') || '';
             }
@@ -1763,7 +1774,8 @@
                 body: JSON.stringify({
                     decision: decision,
                     counter_pitch: counterPitch,
-                    notes: 'Handled from post-show recap'
+                    selected_action: selectedAction,
+                    notes: selectedAction ? ('Approved next move: ' + selectedAction) : 'Handled from post-show recap'
                 })
             });
             var data = await response.json();
@@ -1778,6 +1790,15 @@
             else alert(error.message);
         }
     };
+
+    document.addEventListener('click', function(event) {
+        var btn = event.target.closest('[data-fallout-decision]');
+        if (!btn) return;
+        var group = btn.closest('.post-fallout-actions');
+        if (!group) return;
+        event.preventDefault();
+        window.decidePostShowFalloutItem(group.getAttribute('data-item-id'), btn.getAttribute('data-fallout-decision'));
+    });
 
     window.autoHandlePostShowFallout = async function() {
         try {
