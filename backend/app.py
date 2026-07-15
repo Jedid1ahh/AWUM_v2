@@ -450,6 +450,11 @@ def simulation_expansion_view():
 @app.route('/booker')
 def booker_view():
     return render_template('booker.html')
+
+@app.route('/my-inbox')
+def my_inbox_view():
+    return render_template('my_inbox.html')
+
 @app.route('/history-hub')
 def history_hub_view():
     """Historical records and archive dashboard."""
