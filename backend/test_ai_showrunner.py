@@ -280,6 +280,96 @@ class AIShowrunnerTests(unittest.TestCase):
         inbox = self.service.inbox(status="pending", category="promo")
         self.assertGreaterEqual(inbox["total"], 1)
 
+    def test_approved_llm_match_materializes_booking_segment(self):
+        approval = self.service.queue_external_item(
+            1,
+            15,
+            "llm_pitch",
+            "test_pitch",
+            "match",
+            "high",
+            "Book Alpha Ace vs Beta Brawler",
+            "Approved match using real roster members only.",
+            {
+                "llm_proposal": {
+                    "title": "Book Alpha Ace vs Beta Brawler",
+                    "summary": "Alpha Ace faces Beta Brawler in a featured match.",
+                    "proposal_type": "match",
+                    "referenced_wrestlers": ["Alpha Ace", "Beta Brawler"],
+                }
+            },
+            "ask",
+        )
+
+        decided = self.service.decide_approval(approval["id"], {"decision": "approve"})
+        self.assertEqual(decided["status"], "approved")
+
+        segment = self.database.conn.execute(
+            "SELECT * FROM booking_segments WHERE source_item_id = ? AND item_type = 'llm_approved'",
+            (approval["id"],),
+        ).fetchone()
+        self.assertIsNotNone(segment)
+        self.assertEqual(segment["allocation_status"], "approved_llm")
+
+    def test_approved_llm_proposal_with_unknown_wrestler_is_blocked(self):
+        approval = self.service.queue_external_item(
+            1,
+            15,
+            "llm_pitch",
+            "bad_pitch",
+            "match",
+            "high",
+            "Book The Rumble vs The Viper",
+            "Fake names should never execute.",
+            {
+                "llm_proposal": {
+                    "title": "Book The Rumble vs The Viper",
+                    "summary": "The Rumble faces The Viper.",
+                    "proposal_type": "match",
+                    "referenced_wrestlers": ["The Rumble", "The Viper"],
+                }
+            },
+            "ask",
+        )
+
+        self.service.decide_approval(approval["id"], {"decision": "approve"})
+        execution = self.database.conn.execute(
+            "SELECT * FROM llm_proposal_executions WHERE approval_id = ?",
+            (approval["id"],),
+        ).fetchone()
+        self.assertEqual(execution["status"], "blocked")
+        segment = self.database.conn.execute(
+            "SELECT * FROM booking_segments WHERE source_item_id = ?",
+            (approval["id"],),
+        ).fetchone()
+        self.assertIsNone(segment)
+
+    def test_talent_chat_tracks_push_promise_for_selected_wrestler(self):
+        from services.talent_chat_service import TalentChatService
+
+        class WrongNameProvider:
+            def complete_json(self, system_prompt, user_prompt, schema_hint=None):
+                from services.llm_provider import LLMResult
+                return LLMResult(
+                    provider="test",
+                    model="wrong-name",
+                    content="{}",
+                    parsed={"wrestler_name": "The Rumble", "reply": "I am not real.", "morale": 99, "stage": "ecstatic"},
+                )
+
+        chat = TalentChatService(self.database, WrongNameProvider())
+        result = chat.chat("w_alpha", "I promise I will push you in 2 days.", 1, 16)
+
+        self.assertEqual(result["wrestler_name"], "Alpha Ace")
+        self.assertTrue(result["promise_created"])
+        self.assertEqual(result["promise"]["deadline_weeks"], 1)
+        promise = self.database.conn.execute(
+            "SELECT * FROM contract_promises WHERE wrestler_id = ?",
+            ("w_alpha",),
+        ).fetchone()
+        self.assertIsNotNone(promise)
+        self.assertEqual(promise["promise_type"], "push")
+
 
 if __name__ == "__main__":
     unittest.main()

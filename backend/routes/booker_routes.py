@@ -7,6 +7,7 @@ from flask import Blueprint, current_app, jsonify, request
 from services.ai_showrunner_service import AIShowrunnerService
 from services.post_show_fallout_service import PostShowFalloutService
 from services.llm_provider import LLMProvider, LLMProposalService
+from services.talent_chat_service import TalentChatService
 
 booker_bp = Blueprint('booker', __name__)
 
@@ -44,6 +45,14 @@ def get_llm_proposal_service():
     if service is None:
         service = LLMProposalService(get_showrunner(), LLMProvider())
         current_app.config['LLM_PROPOSAL_SERVICE'] = service
+    return service
+
+
+def get_talent_chat_service():
+    service = current_app.config.get('TALENT_CHAT_SERVICE')
+    if service is None:
+        service = TalentChatService(get_database(), LLMProvider())
+        current_app.config['TALENT_CHAT_SERVICE'] = service
     return service
 
 def _now_iso() -> str:
@@ -735,3 +744,16 @@ def auto_handle_post_show_fallout(report_id):
     except Exception as exc:
         current_app.logger.exception("Post-show fallout auto-handle failed")
         return jsonify({'error': str(exc)}), 500
+
+
+@booker_bp.route('/api/talent-chat/<wrestler_id>/message', methods=['POST'])
+def talent_chat_message(wrestler_id):
+    data = request.get_json(silent=True) or {}
+    state = getattr(get_universe(), 'state', {}) if get_universe() else {}
+    year, week = _request_year_week(data, state or {})
+    try:
+        return jsonify(get_talent_chat_service().chat(wrestler_id, data.get('message', ''), year, week))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'error': f'Talent chat failed: {exc}'}), 500
